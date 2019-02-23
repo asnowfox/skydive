@@ -1,22 +1,17 @@
 /*
  * Copyright (C) 2015 Red Hat, Inc.
  *
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy ofthe License at
  *
- *  http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specificlanguage governing permissions and
+ * limitations under the License.
  *
  */
 
@@ -54,6 +49,7 @@ type OvsMonitorHandler interface {
 	OnOvsPortAdd(monitor *OvsMonitor, uuid string, row *libovsdb.RowUpdate)
 	OnOvsPortDel(monitor *OvsMonitor, uuid string, row *libovsdb.RowUpdate)
 	OnOvsPortUpdate(monitor *OvsMonitor, uuid string, row *libovsdb.RowUpdate)
+	OnOvsUpdate(monitor *OvsMonitor, row *libovsdb.RowUpdate)
 }
 
 // DefaultOvsMonitorHandler default implementation of an handler
@@ -102,6 +98,10 @@ func (d *DefaultOvsMonitorHandler) OnOvsPortDel(monitor *OvsMonitor, uuid string
 
 //OnOvsPortUpdate default implementation
 func (d *DefaultOvsMonitorHandler) OnOvsPortUpdate(monitor *OvsMonitor, uuid string, row *libovsdb.RowUpdate) {
+}
+
+//OnOvsUpdate default implementation
+func (d *DefaultOvsMonitorHandler) OnOvsUpdate(monitor *OvsMonitor, row *libovsdb.RowUpdate) {
 }
 
 // OvsMonitor describes an OVS client Monitor
@@ -216,6 +216,10 @@ func (o *OvsMonitor) bridgeAdded(bridgeUUID string, row *libovsdb.RowUpdate) {
 }
 
 func (o *OvsMonitor) bridgeDeleted(bridgeUUID string, row *libovsdb.RowUpdate) {
+	// for some reason ovs can trigger multiple time this event
+	if _, ok := o.bridgeCache[bridgeUUID]; !ok {
+		return
+	}
 	delete(o.bridgeCache, bridgeUUID)
 
 	logging.GetLogger().Infof("Bridge \"%s(%s)\" got deleted",
@@ -267,6 +271,10 @@ func (o *OvsMonitor) interfaceAdded(interfaceUUID string, row *libovsdb.RowUpdat
 }
 
 func (o *OvsMonitor) interfaceDeleted(interfaceUUID string, row *libovsdb.RowUpdate) {
+	// for some reason ovs can trigger multiple time this event
+	if _, ok := o.interfaceCache[interfaceUUID]; !ok {
+		return
+	}
 	delete(o.interfaceCache, interfaceUUID)
 
 	logging.GetLogger().Infof("Interface \"%s(%s)\" got deleted",
@@ -317,6 +325,10 @@ func (o *OvsMonitor) portAdded(portUUID string, row *libovsdb.RowUpdate) {
 }
 
 func (o *OvsMonitor) portDeleted(portUUID string, row *libovsdb.RowUpdate) {
+	// for some reason ovs can trigger multiple time this event
+	if _, ok := o.portCache[portUUID]; !ok {
+		return
+	}
 	delete(o.portCache, portUUID)
 
 	logging.GetLogger().Infof("Port \"%s(%s)\" got deleted",
@@ -346,6 +358,20 @@ func (o *OvsMonitor) portUpdateHandler(updates *libovsdb.TableUpdate) {
 	}
 }
 
+func (o *OvsMonitor) ovsUpdate(row *libovsdb.RowUpdate) {
+	logging.GetLogger().Info("OpenvSwitch system updated")
+
+	for _, handler := range o.MonitorHandlers {
+		handler.OnOvsUpdate(o, row)
+	}
+}
+
+func (o *OvsMonitor) ovsUpdateHandler(updates *libovsdb.TableUpdate) {
+	for _, row := range updates.Rows {
+		o.ovsUpdate(&row)
+	}
+}
+
 func (o *OvsMonitor) updateHandler(updates *libovsdb.TableUpdates) {
 	for name, tableUpdate := range updates.Updates {
 		switch name {
@@ -355,7 +381,10 @@ func (o *OvsMonitor) updateHandler(updates *libovsdb.TableUpdates) {
 			o.bridgeUpdateHandler(&tableUpdate)
 		case "Port":
 			o.portUpdateHandler(&tableUpdate)
+		case "Open_vSwitch":
+			o.ovsUpdateHandler(&tableUpdate)
 		}
+
 	}
 }
 
@@ -487,6 +516,11 @@ func (o *OvsMonitor) monitorOvsdb() error {
 	}
 
 	err = o.setMonitorRequests("Port", &requests)
+	if err != nil {
+		return err
+	}
+
+	err = o.setMonitorRequests("Open_vSwitch", &requests)
 	if err != nil {
 		return err
 	}

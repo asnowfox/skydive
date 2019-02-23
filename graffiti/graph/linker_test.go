@@ -1,22 +1,17 @@
 /*
  * Copyright (C) 2018 Red Hat, Inc.
  *
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy ofthe License at
  *
- *  http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specificlanguage governing permissions and
+ * limitations under the License.
  *
  */
 
@@ -197,6 +192,118 @@ func TestMetadataIndexerLinker(t *testing.T) {
 
 	if !g.AreLinked(n2, n3, Metadata{"RelationType": "metadataIndexerLinker"}) {
 		t.Error("nodes should be linked by an edge of type 'metadataIndexerLinker'")
+	}
+
+	if g.AreLinked(n1, n3, Metadata{"RelationType": "metadataIndexerLinker"}) {
+		t.Error("nodes should be not linked by an edge of type 'metadataIndexerLinker'")
+	}
+}
+
+func TestMetadataIndexerLinkerWithArray(t *testing.T) {
+	g := newGraph(t)
+
+	vfCache := NewMetadataIndexer(g, g, nil, "VFS.MAC")
+	vfCache.Start()
+
+	macCache := NewMetadataIndexer(g, g, nil, "MAC")
+	macCache.Start()
+
+	vf1 := Metadata{
+		"Name": "vf1",
+		"VFS": []interface{}{
+			map[string]interface{}{
+				"MAC": "00:11:22:33:44:55",
+			},
+			map[string]interface{}{
+				"MAC": "01:23:45:67:89:ab",
+			},
+		},
+	}
+
+	m1 := Metadata{
+		"Name": "m1",
+		"MAC":  "00:11:22:33:44:55",
+	}
+
+	m2 := Metadata{
+		"Name": "m2",
+		"MAC":  "01:23:45:67:89:ab",
+	}
+
+	linker := NewMetadataIndexerLinker(g, vfCache, macCache, Metadata{"RelationType": "metadataIndexerLinker"})
+	linker.Start()
+
+	n1, _ := g.NewNode(GenID(), vf1, "host")
+	n2, _ := g.NewNode(GenID(), m1, "host")
+	n3, _ := g.NewNode(GenID(), m2, "host")
+
+	if !g.AreLinked(n1, n2, Metadata{"RelationType": "metadataIndexerLinker"}) {
+		t.Error("nodes should be linked by an edge of type 'metadataIndexerLinker'")
+	}
+
+	if !g.AreLinked(n1, n3, Metadata{"RelationType": "metadataIndexerLinker"}) {
+		t.Error("nodes should be linked by an edge of type 'metadataIndexerLinker'")
+	}
+
+	g.SetMetadata(n3, Metadata{
+		"Name": "m2",
+		"MAC":  "01:23:45:67:89:af",
+	})
+
+	if !g.AreLinked(n1, n2, Metadata{"RelationType": "metadataIndexerLinker"}) {
+		t.Error("nodes should be linked by an edge of type 'metadataIndexerLinker'")
+	}
+
+	if g.AreLinked(n1, n3, Metadata{"RelationType": "metadataIndexerLinker"}) {
+		t.Error("nodes should be not linked by an edge of type 'metadataIndexerLinker'")
+	}
+
+	g.SetMetadata(n1, Metadata{
+		"Name": "vf1",
+		"VFS": []interface{}{
+			map[string]interface{}{
+				"MAC": "00:11:22:33:44:59",
+			},
+			map[string]interface{}{
+				"MAC": "01:23:45:67:89:ab",
+			},
+		},
+	})
+
+	if g.AreLinked(n1, n2, Metadata{"RelationType": "metadataIndexerLinker"}) {
+		t.Error("nodes should be not linked by an edge of type 'metadataIndexerLinker'")
+	}
+
+	if g.AreLinked(n1, n3, Metadata{"RelationType": "metadataIndexerLinker"}) {
+		t.Error("nodes should be not linked by an edge of type 'metadataIndexerLinker'")
+	}
+
+	g.SetMetadata(n1, Metadata{
+		"Name": "vf1",
+		"VFS": []interface{}{
+			map[string]interface{}{
+				"MAC": "00:11:22:33:44:59",
+			},
+			map[string]interface{}{
+				"MAC": "01:23:45:67:89:af",
+			},
+		},
+	})
+
+	if g.AreLinked(n1, n2, Metadata{"RelationType": "metadataIndexerLinker"}) {
+		t.Error("nodes should be not linked by an edge of type 'metadataIndexerLinker'")
+	}
+
+	if !g.AreLinked(n1, n3, Metadata{"RelationType": "metadataIndexerLinker"}) {
+		t.Error("nodes should be linked by an edge of type 'metadataIndexerLinker'")
+	}
+
+	g.SetMetadata(n1, Metadata{
+		"Name": "vf1",
+	})
+
+	if g.AreLinked(n1, n2, Metadata{"RelationType": "metadataIndexerLinker"}) {
+		t.Error("nodes should be not linked by an edge of type 'metadataIndexerLinker'")
 	}
 
 	if g.AreLinked(n1, n3, Metadata{"RelationType": "metadataIndexerLinker"}) {

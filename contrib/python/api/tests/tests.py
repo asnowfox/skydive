@@ -48,7 +48,7 @@ class SkydiveWSTest(unittest.TestCase):
         subprocess.call(["docker", "run", "--name",
                          "skydive-docker-python-tests", "-p", "8082:8082"] +
                         extraArgs +
-                        ["-d", "skydive/skydive:devel", "analyzer"])
+                        ["-d", "skydive/skydive:devel", "allinone"])
         time.sleep(10)
 
     @classmethod
@@ -199,12 +199,13 @@ class SkydiveWSTest(unittest.TestCase):
 
         noderule1 = restclient.noderule_create(
             "create", metadata={"Name": "node1", "Type": "fabric"})
+
         noderule2 = restclient.noderule_create(
             "create", metadata={"Name": "node2", "Type": "fabric"})
 
         time.sleep(1)
 
-        edgerule = restclient.edgerule_create(
+        edgerule1 = restclient.edgerule_create(
                 "G.V().Has('Name', 'node1')", "G.V().Has('Name', 'node2')",
                 {"RelationType": "layer2", "EdgeName": "my_edge"})
 
@@ -220,6 +221,54 @@ class SkydiveWSTest(unittest.TestCase):
                 "G.E().Has('RelationType', 'layer2', 'EdgeName', 'my_edge')")
         self.assertEqual(len(edge), 1, "should find only one edge")
 
-        restclient.edgerule_delete(edgerule.uuid)
+        noderules = restclient.noderule_list()
+        self.assertGreaterEqual(len(noderules), 2, "no noderules found")
+        found = False
+        for noderule in noderules:
+            if (noderule.uuid == noderule1.uuid):
+                found = True
+                break
+
+        self.assertTrue(found, "created noderule not found")
+
+        edgerules = restclient.edgerule_list()
+        self.assertGreaterEqual(len(edgerules), 1, "no edgerules found")
+        found = False
+        for edgerule in edgerules:
+            if (edgerule.uuid == edgerule1.uuid):
+                found = True
+                break
+
+        self.assertTrue(found, "created edgerule not found")
+        restclient.edgerule_delete(edgerule1.uuid)
         restclient.noderule_delete(noderule1.uuid)
         restclient.noderule_delete(noderule2.uuid)
+
+    def test_injections(self):
+        restclient = RESTClient("localhost:8082",
+                                scheme=self.schemeHTTP,
+                                username=self.username,
+                                password=self.password,
+                                insecure=True)
+
+        nodes = restclient.lookup("G.V().Has('Name', 'eth0')")
+
+        testnode = nodes[0]["Metadata"]["TID"]
+
+        query = "G.V().Has('TID', '" + testnode + "')"
+        num_injections_before = len(restclient.injection_list())
+
+        injection_response = restclient.injection_create(query, query,
+                                                         count=1000)
+
+        num_injections_after = len(restclient.injection_list())
+
+        self.assertEqual(num_injections_after, num_injections_before + 1,
+                         "injection creation didn't succeed")
+
+        restclient.injection_delete(injection_response.uuid)
+
+        num_injections_after_deletion = len(restclient.injection_list())
+
+        self.assertEqual(num_injections_after_deletion, num_injections_before,
+                         "injection deletion didn't succeed")

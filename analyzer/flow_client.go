@@ -1,22 +1,17 @@
 /*
  * Copyright (C) 2015 Red Hat, Inc.
  *
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy ofthe License at
  *
- *  http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specificlanguage governing permissions and
+ * limitations under the License.
  *
  */
 
@@ -110,7 +105,7 @@ func (c *FlowClientWebSocketConn) Close() error {
 
 // Connect to the WebSocket flow server
 func (c *FlowClientWebSocketConn) Connect() (err error) {
-	if c.wsClient, err = config.NewWSClient(common.AgentService, c.url, c.authOpts, nil); err != nil {
+	if c.wsClient, err = config.NewWSClient(common.AgentService, c.url, ws.ClientOpts{AuthOpts: c.authOpts}); err != nil {
 		return nil
 	}
 
@@ -146,7 +141,7 @@ func (c *FlowClient) close() {
 
 // SendFlow sends a flow to the server
 func (c *FlowClient) SendFlow(f *flow.Flow) error {
-	data, err := f.GetData()
+	data, err := f.Marshal()
 	if err != nil {
 		return err
 	}
@@ -164,10 +159,11 @@ retry:
 }
 
 // SendFlows sends flows to the server
-func (c *FlowClient) SendFlows(flows []*flow.Flow) {
-	for _, flow := range flows {
-		err := c.SendFlow(flow)
-		if err != nil {
+func (c *FlowClient) SendFlows(flowArray *flow.FlowArray) {
+	// TODO(safchain) in case of websocket there is no size limitation we should send
+	// bulk directly
+	for _, flow := range flowArray.Flows {
+		if err := c.SendFlow(flow); err != nil {
 			logging.GetLogger().Errorf("Unable to send flow: %s", err)
 		}
 	}
@@ -240,7 +236,7 @@ func (p *FlowClientPool) OnDisconnected(c ws.Speaker) {
 }
 
 // SendFlows sends flows using a random connection
-func (p *FlowClientPool) SendFlows(flows []*flow.Flow) {
+func (p *FlowClientPool) SendFlows(flowArray *flow.FlowArray) {
 	p.RLock()
 	defer p.RUnlock()
 
@@ -249,7 +245,7 @@ func (p *FlowClientPool) SendFlows(flows []*flow.Flow) {
 	}
 
 	fc := p.flowClients[rand.Intn(len(p.flowClients))]
-	fc.SendFlows(flows)
+	fc.SendFlows(flowArray)
 }
 
 // Close all connections

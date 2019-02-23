@@ -1,28 +1,24 @@
 /*
  * Copyright (C) 2016 Red Hat, Inc.
  *
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy ofthe License at
  *
- *  http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specificlanguage governing permissions and
+ * limitations under the License.
  *
  */
 
 package client
 
 import (
+	"encoding/json"
 	"net/http"
 	"time"
 
@@ -51,9 +47,14 @@ type OnDemandProbeClient struct {
 	subscriberPool       ws.StructSpeakerPool
 	captures             map[string]*types.Capture
 	watcher              api.StoppableWatcher
-	registeredNodes      map[string]string
+	registeredNodes      map[string]*captureNodeState
 	deletedNodeCache     *cache.Cache
 	checkForRegistration *common.Debouncer
+}
+
+type captureNodeState struct {
+	uuid    string
+	started bool
 }
 
 type nodeProbe struct {
@@ -65,7 +66,7 @@ type nodeProbe struct {
 // OnStructMessage event, valid message type : CaptureStartReply or CaptureStopReply message
 func (o *OnDemandProbeClient) OnStructMessage(c ws.Speaker, m *ws.StructMessage) {
 	var query ondemand.CaptureQuery
-	if err := m.UnmarshalObj(&query); err != nil {
+	if err := json.Unmarshal(m.Obj, &query); err != nil {
 		logging.GetLogger().Errorf("Unable to decode capture %v", m)
 		return
 	}
@@ -164,7 +165,7 @@ func (o *OnDemandProbeClient) registerProbe(np nodeProbe) bool {
 		return false
 	}
 	o.Lock()
-	o.registeredNodes[np.id] = cq.Capture.ID()
+	o.registeredNodes[np.id] = &captureNodeState{uuid: cq.Capture.ID()}
 	o.Unlock()
 
 	return true
@@ -247,14 +248,25 @@ func (o *OnDemandProbeClient) OnNodeAdded(n *graph.Node) {
 
 // OnNodeUpdated graph event
 func (o *OnDemandProbeClient) OnNodeUpdated(n *graph.Node) {
+	o.RLock()
+	if state, ok := o.registeredNodes[string(n.ID)]; ok {
+		if !state.started {
+			if s, _ := n.GetFieldString("Capture.State"); s == "active" {
+				state.started = true
+				o.subscriberPool.BroadcastMessage(ws.NewStructMessage(ondemand.NotificationNamespace, "CaptureNodeUpdated", state.uuid))
+			}
+		}
+	}
+	o.RUnlock()
+
 	o.checkForRegistration.Call()
 }
 
 // OnNodeDeleted graph event
 func (o *OnDemandProbeClient) OnNodeDeleted(n *graph.Node) {
 	o.RLock()
-	if uuid, ok := o.registeredNodes[string(n.ID)]; ok {
-		o.subscriberPool.BroadcastMessage(ws.NewStructMessage(ondemand.NotificationNamespace, "CaptureNodeUpdated", uuid))
+	if state, ok := o.registeredNodes[string(n.ID)]; ok {
+		o.subscriberPool.BroadcastMessage(ws.NewStructMessage(ondemand.NotificationNamespace, "CaptureNodeUpdated", state.uuid))
 	}
 	o.RUnlock()
 }
@@ -387,7 +399,7 @@ func NewOnDemandProbeClient(g *graph.Graph, ch *api.CaptureAPIHandler, agentPool
 		agentPool:        agentPool,
 		subscriberPool:   subscriberPool,
 		captures:         captures,
-		registeredNodes:  make(map[string]string),
+		registeredNodes:  make(map[string]*captureNodeState),
 		deletedNodeCache: cache.New(election.TTL()*2, election.TTL()*2),
 	}
 	o.checkForRegistration = common.NewDebouncer(time.Second, o.checkForRegistrationCallback)

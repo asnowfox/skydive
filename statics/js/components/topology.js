@@ -88,7 +88,7 @@ var TopologyComponent = {
                     <input list="topology-highlight-list" placeholder="e.g. g.V().Has(,)" \
                     id="topology-highlight" type="text" style="width: 400px" \
                     v-model="topologyEmphasize" @keyup.enter="emphasizeGremlinExpr" \
-                    v-on:input="onFilterDatalistSelect" \
+                    v-on:input="onHighlightDatalistSelect" \
                     class="input-sm form-control"></input>\
                     <span class="clear-btn" @click.stop="topologyEmphasizeClear">&times;</span>\
                     <datalist id="topology-highlight-list" class="topology-gremlin-favorites">\
@@ -143,6 +143,24 @@ var TopologyComponent = {
                  :class="{\'glyphicon-resize-full\': currentNode.group.collapsed, \'glyphicon-resize-small\': !currentNode.group.collapsed}" aria-hidden="true"></span>\
             </span>\
           </button>\
+          <button id="pin-all" type="button" class="btn btn-primary" \
+                  title="Pin all nodes" @click="pinAll">\
+            <span class="expand-icon-stack">\
+              <i class="glyphicon glyphicon-pushpin icon-main"></i>\
+            </span>\
+            <span class="expand-icon-stack">\
+              <i class="glyphicon glyphicon-ok-circle icon-sub"></i>\
+            </span>\
+          </button>\
+          <button id="unpin-all" type="button" class="btn btn-primary" \
+                title="Unpin all nodes" @click="unPinAll">\
+          <span class="expand-icon-stack">\
+            <i class="glyphicon glyphicon-pushpin icon-main"></i>\
+          </span>\
+          <span class="expand-icon-stack">\
+            <i class="glyphicon glyphicon-remove-circle icon-sub"></i>\
+          </span>\
+        </button>\
         </div>\
       </div>\
       <div id="info-panel" class="col-sm-5 sidebar">\
@@ -217,7 +235,7 @@ var TopologyComponent = {
           </div>\
         </panel>\
         <panel id="ovs-metric" v-if="currentNodeOvsMetric"\
-               title="OVS metrics">\
+               title="OVS Metrics">\
           <h2>Total metrics</h2>\
           <metrics-table :object="currentNodeOvsMetric" :keys="globalVars[\'interface-metric-keys\']"></metrics-table>\
           <div v-show="currentNodeOvsLastUpdateMetric && topologyTimeContext === 0">\
@@ -225,6 +243,16 @@ var TopologyComponent = {
             <metrics-table :object="currentNodeOvsLastUpdateMetric" :keys="globalVars[\'interface-metric-keys\']" \
               :defaultKeys="[\'Last\', \'Start\', \'RxBytes\', \'RxPackets\', \'TxBytes\', \'TxPackets\']"></metrics-table>\
           </div>\
+        </panel>\
+        <panel id="ovs-sflow-metric" v-if="currentNodeSFlowMetric"\
+               title="OVS SFlow Metrics">\
+           <h2>Total metrics</h2>\
+           <sflow-metrics-table :object="currentNodeSFlowMetric" :keys="globalVars[\'sflow-metric-keys\']"></sflow-metrics-table>\
+           <div v-show="currentNodeSFlowLastUpdateMetric && topologyTimeContext === 0">\
+             <h2>Last metrics</h2>\
+             <sflow-metrics-table :object="currentNodeSFlowLastUpdateMetric" :keys="globalVars[\'sflow-metric-keys\']" \
+                :defaultKeys="[\'Last\', \'IfInUcastPkts\', \'IfOutUcastPkts\', \'IfInOctets\', \'IfOutOctets\', \'IfInDiscards\', \'OvsdpNHit\', \'OvsdpNMissed\', \'OvsdpNMaskHit\']"></sflow-metrics-table>\
+           </div>\
         </panel>\
         <panel id="routing-tabel" v-if="currentNodeMetadata && currentNode.metadata.RoutingTables"\
                title="Routing tables">\
@@ -287,6 +315,7 @@ var TopologyComponent = {
     var emphasizeWatcher = {
       onEdgeAdded: this.emphasize,
       onNodeAdded: this.emphasize,
+      onEdgeDeleted: this.emphasize
     };
     this.graph.addHandler(emphasizeWatcher);
 
@@ -315,9 +344,9 @@ var TopologyComponent = {
       else if (mutation.type === "unhighlight")
         self.layout.unhighlightNodeID(mutation.payload);
       else if (mutation.type === "emphasize")
-        self.layout.emphasizeNodeID(mutation.payload);
+        self.layout.emphasizeID(mutation.payload);
       else if (mutation.type === "deemphasize")
-        self.layout.deemphasizeNodeID(mutation.payload);
+        self.layout.deemphasizeID(mutation.payload);
     });
 
     this.setGremlinFavoritesFromConfig();
@@ -411,7 +440,7 @@ var TopologyComponent = {
     currentNodeMetadata: function() {
       if (!this.currentNode) return null;
       return this.extractMetadata(this.currentNode.metadata,
-        ['LastUpdateMetric', 'Metric', 'Ovs.Metric', 'Ovs.LastUpdateMetric', 'RoutingTables', 'Features', 'K8s.Extra', 'Docker']);
+        ['LastUpdateMetric', 'Metric', 'Ovs.Metric', 'Ovs.LastUpdateMetric', 'SFlow.Metric', 'SFlow.LastUpdateMetric', 'RoutingTables', 'Features', 'K8s.Extra', 'Docker']);
     },
 
     currentNodeFlowsQuery: function() {
@@ -429,7 +458,7 @@ var TopologyComponent = {
       if (!this.currentNodeMetadata || !this.currentNode.metadata.K8s || !this.currentNode.metadata.K8s.Extra) return null;
       return this.currentNode.metadata.K8s.Extra;
     },
- 
+
     currentNodeFeatures: function() {
       if (!this.currentNodeMetadata || !this.currentNode.metadata.Features) return null;
       return this.currentNode.metadata.Features;
@@ -453,6 +482,16 @@ var TopologyComponent = {
     currentNodeOvsLastUpdateMetric: function() {
       if (!this.currentNodeMetadata || !this.currentNode.metadata.Ovs || !this.currentNode.metadata.Ovs.LastUpdateMetric) return null;
       return this.normalizeMetric(this.currentNode.metadata.Ovs.LastUpdateMetric);
+    },
+
+    currentNodeSFlowMetric: function() {
+      if (!this.currentNodeMetadata || !this.currentNode.metadata.SFlow || !this.currentNode.metadata.SFlow.Metric) return null;
+      return this.normalizeMetric(this.currentNode.metadata.SFlow.Metric);
+    },
+
+    currentNodeSFlowLastUpdateMetric: function() {
+      if (!this.currentNodeMetadata || !this.currentNode.metadata.SFlow || !this.currentNode.metadata.SFlow.LastUpdateMetric) return null;
+      return this.normalizeMetric(this.currentNode.metadata.SFlow.LastUpdateMetric);
     },
 
     canReadCaptures: function() {
@@ -480,7 +519,11 @@ var TopologyComponent = {
     },
 
     isK8SEnabled: function() {
-      return app.getConfigValue('k8s_enabled')
+      return app.getConfigValue('k8s_enabled') || (globalVars["probes"].indexOf("k8s") >= 0);
+    },
+	
+    isIstioEnabled: function() {
+      return app.getConfigValue('istio_enabled')
     },
 
     metadataLinks: function(m) {
@@ -527,6 +570,14 @@ var TopologyComponent = {
       this.layout.zoomFit();
     },
 
+    pinAll: function() {
+      this.layout.pinAll();
+    },
+
+    unPinAll: function() {
+      this.layout.unPinAll();
+    },
+
     topologyFilterClear: function () {
       this.topologyFilter = '';
       this.topologyFilterQuery();
@@ -541,9 +592,8 @@ var TopologyComponent = {
        return str.indexOf(suffix, str.length - suffix.length) !== -1;
     },
 
-    addFilter: function(label, gremlin) {
-      $(".topology-gremlin-favorites").append($("<option/>").val(label).attr('gremlin', gremlin));
-      $(".topology-highlight-list").append($("<option/>").val(label).attr('gremlin', gremlin));
+    addFilter: function(control, label, gremlin) {
+      control.append($("<option/>").val(label).attr('gremlin', gremlin));
     },
 
     gremlinK8sTypes: function(types) {
@@ -555,26 +605,40 @@ var TopologyComponent = {
           }
           gremlin += ".Has('Type', Within(" + types.join(", ") + "))";
         }
-
-        // FIXME: HasNot() is not yet supported by backend so for now don't filter out system namespaces
-        // gremlin += ".HasNot('Type', 'namespace', 'Name', Within('kube-system', 'istio-system'))";
-        // gremlin += ".HasNot('Type, NE('namespace'), 'K8s.Namespace', Within('kube-system', 'istio-system'))";
         return gremlin
     },
 
-    addFilterK8sTypes: function(label, types) {
-        this.addFilter("k8s " + label, this.gremlinK8sTypes(types));
+    addFilterK8s: function(control, label, gremlin) {
+      this.addFilter(control, "k8s " + label, gremlin);
+    },
+
+    addFilterK8sTypes: function(control, label, types) {
+      this.addFilterK8s(control, label, this.gremlinK8sTypes(types));
+    },
+
+    addFilterIstio: function(control, label, gremlin) {
+      this.addFilter(control, "istio " + label, gremlin);
+    },
+
+    addFilterIstioTypes: function(control, label, types) {
+      this.addFilterIstio(control, label, this.gremlinK8sTypes(types));
     },
 
     setGremlinFavoritesFromConfig: function() {
       var self = this;
-      $(".topology-gremlin-favorites").children().remove();
-      $(".topology-highlight-list").children().remove();
+
+      const filter = $("#topology-gremlin-favorites");
+      const highlight = $("#topology-highlight-list");
+
+      filter.children().remove();
+      highlight.children().remove();
+
       if (typeof(Storage) !== "undefined" && localStorage.preferences) {
         var favorites = JSON.parse(localStorage.preferences).favorites;
         if (favorites) {
           $.each(favorites, function(i, f) {
-            self.addFilter(f.name, f.expression);
+            self.addFilter(filter, f.name, f.expression);
+            self.addFilter(highlight, f.name, f.expression);
           });
         }
       }
@@ -582,17 +646,35 @@ var TopologyComponent = {
       var favorites = app.getConfigValue('topology.favorites');
       if (favorites) {
         $.each(favorites, function(key, value) {
-          self.addFilter(key, value);
+          self.addFilter(filter, key, value);
+          self.addFilter(highlight, key, value);
         });
       }
 
       if (self.isK8SEnabled()) {
-        self.addFilterK8sTypes("all", []);
-        self.addFilterK8sTypes("compute", ["cluster", "container", "namespace", "node", "pod"]);
-        self.addFilterK8sTypes("deployment", ["cluster", "deployment", "job", "namespace", "node", "pod", "replicaset", "replicationcontroller", "statefulset"]);
-        self.addFilterK8sTypes("network", ["cluster", "container", "namespace", "networkpolicy", "pod"]);
-        self.addFilterK8sTypes("service", ["cluster", "endpoints", "ingress",  "namespace", "node", "pod", "service"]);
-        self.addFilterK8sTypes("storage", ["cluster", "namespace", "persistentvolume", "persistentvolumeclaim", "storageclass"]);
+        self.addFilterK8s(filter, "none", "G.V().Has('Manager', Without('k8s', 'istio'))")
+
+        self.addFilterK8sTypes(filter, "all", []);
+
+        self.addFilterK8sTypes(filter, "compute", ["cluster", "container", "namespace", "node", "pod"]);
+        self.addFilterK8sTypes(highlight, "compute", ["container", "pod"]);
+
+        self.addFilterK8sTypes(filter, "deployment", ["cluster", "deployment", "job", "namespace", "node", "pod", "replicaset", "replicationcontroller", "statefulset"]);
+        self.addFilterK8sTypes(highlight, "deployment", ["deployment", "job", "replicaset", "replicationcontroller", "statefulset"]);
+
+        self.addFilterK8sTypes(filter, "network", ["cluster", "container", "namespace", "networkpolicy", "pod"]);
+        self.addFilterK8sTypes(highlight, "network", ["networkpolicy", "pod"]);
+
+        self.addFilterK8sTypes(filter, "service", ["cluster", "container", "endpoints", "ingress", "namespace", "networkpolicy", "pod", "service"]);
+        self.addFilterK8sTypes(highlight, "service", ["endpoints", "ingress", "service"]);
+
+        self.addFilterK8sTypes(filter, "storage", ["cluster", "container", "namespace", "persistentvolume", "persistentvolumeclaim", "pod", "storageclass"]);
+        self.addFilterK8sTypes(highlight, "storage", ["container", "persistentvolume", "persistentvolumeclaim", "pod", "storageclass"]);
+      }
+
+      if (self.isIstioEnabled()) {
+        self.addFilterIstioTypes(filter, "network", ["cluster", "container", "namespace", "pod", "virtualservice", "gateway"]);
+        self.addFilterIstioTypes(highlight, "network", ["pod", "virtualservice", "gateway"]);
       }
 
       var default_filter = app.getConfigValue('topology.default_filter');
@@ -608,21 +690,31 @@ var TopologyComponent = {
       }
     },
 
-    onFilterDatalistSelect: function(e) {
+    onDatalistSelect: function(e, selectFilter) {
       var val = e.target.value;
       var listId = e.target.getAttribute("list");
       var opts = document.getElementById(listId).childNodes;
       for (var i = 0; i < opts.length; i++) {
         if (opts[i].value === val) {
-          if (e.target.id === "topology-filter") {
-            this.topologyFilter = opts[i].getAttribute("gremlin");
-            this.topologyFilterQuery();
-          } else if (e.target.id === "topology-highlight") {
-            this.topologyEmphasize = opts[i].getAttribute("gremlin");
-            this.emphasizeGremlinExpr();
-          }
+          selectFilter(opts[i].getAttribute("gremlin"));
         }
       }
+    },
+
+    onFilterDatalistSelect: function(e) {
+      var self = this;
+      self.onDatalistSelect(e, function(gremlin) {
+        self.topologyFilter = gremlin;
+        self.topologyFilterQuery();
+      });
+    },
+
+    onHighlightDatalistSelect: function(e) {
+      var self = this;
+      self.onDatalistSelect(e, function(gremlin) {
+        self.topologyEmphasize = gremlin;
+        self.emphasizeGremlinExpr();
+      });
     },
 
     topologyTimeTravelClear: function() {
@@ -714,28 +806,41 @@ var TopologyComponent = {
       this.isTopologyOptionsVisible = false;
     },
 
-    emphasizeNodes: function(gremlinExpr) {
+    emphasizeSubgraph: function(gremlinExpr) {
       var self = this;
       var i;
 
       this.$topologyQuery(gremlinExpr)
         .then(function(data) {
           data.forEach(function(sg) {
+            // nodes
             for (i in sg.Nodes) {
               self.$store.commit('emphasize', sg.Nodes[i].ID);
             }
 
+            // edges
+            for (i in sg.Edges) {
+              self.$store.commit('emphasize', sg.Edges[i].ID);
+            }
+
             var toDel = [];
-            for (i in self.$store.state.emphasizedNodes) {
+
+            for (i in self.$store.state.emphasizedIDs) {
               var found = false;
               for (var j in sg.Nodes) {
-                if (self.$store.state.emphasizedNodes[i] === sg.Nodes[j].ID) {
+                if (self.$store.state.emphasizedIDs[i] === sg.Nodes[j].ID) {
+                  found = true;
+                  break;
+                }
+              }
+              for (var j in sg.Edges) {
+                if (self.$store.state.emphasizedIDs[i] === sg.Edges[j].ID) {
                   found = true;
                   break;
                 }
               }
               if (!found) {
-                toDel.push(self.$store.state.emphasizedNodes[i]);
+                toDel.push(self.$store.state.emphasizedIDs[i]);
               }
             }
 
@@ -754,9 +859,9 @@ var TopologyComponent = {
         }
 
         var newGremlinExpr = expr + ".SubGraph()";
-        this.emphasizeNodes(newGremlinExpr);
+        this.emphasizeSubgraph(newGremlinExpr);
       } else {
-        var ids = this.$store.state.emphasizedNodes.slice();
+        var ids = this.$store.state.emphasizedIDs.slice();
         for (var i in ids) {
           this.$store.commit('deemphasize', ids[i]);
         }

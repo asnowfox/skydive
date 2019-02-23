@@ -1,22 +1,17 @@
 /*
  * Copyright (C) 2016 Red Hat, Inc.
  *
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy ofthe License at
  *
- *  http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specificlanguage governing permissions and
+ * limitations under the License.
  *
  */
 
@@ -677,19 +672,15 @@ func TestFlowMetrics(t *testing.T) {
 func TestFlowMetricsStep(t *testing.T) {
 	test := &Test{
 		setupCmds: []Cmd{
-			{"ovs-vsctl add-br br-fms", true},
-
-			{"ovs-vsctl add-port br-fms fms-intf1 -- set interface fms-intf1 type=internal", true},
 			{"ip netns add fms-vm1", true},
-			{"ip link set fms-intf1 netns fms-vm1", true},
-			{"ip netns exec fms-vm1 ip address add 169.254.33.33/24 dev fms-intf1", true},
-			{"ip netns exec fms-vm1 ip link set fms-intf1 up", true},
-
-			{"ovs-vsctl add-port br-fms fms-intf2 -- set interface fms-intf2 type=internal", true},
 			{"ip netns add fms-vm2", true},
+			{"ip link add name fms-intf1 type veth peer name fms-intf2", true},
+			{"ip link set fms-intf1 netns fms-vm1", true},
 			{"ip link set fms-intf2 netns fms-vm2", true},
-			{"ip netns exec fms-vm2 ip address add 169.254.33.34/24 dev fms-intf2", true},
+			{"ip netns exec fms-vm1 ip link set fms-intf1 up", true},
+			{"ip netns exec fms-vm1 ip address add 169.254.33.33/24 dev fms-intf1", true},
 			{"ip netns exec fms-vm2 ip link set fms-intf2 up", true},
+			{"ip netns exec fms-vm2 ip address add 169.254.33.34/24 dev fms-intf2", true},
 		},
 
 		injections: []TestInjection{{
@@ -702,11 +693,10 @@ func TestFlowMetricsStep(t *testing.T) {
 		tearDownCmds: []Cmd{
 			{"ip netns del fms-vm1", true},
 			{"ip netns del fms-vm2", true},
-			{"ovs-vsctl del-br br-fms", true},
 		},
 
 		captures: []TestCapture{
-			{gremlin: g.G.V().Has("Name", "br-fms", "Type", "ovsbridge")},
+			{gremlin: g.G.V().Has("Name", "fms-intf1", "Type", "veth")},
 		},
 
 		mode: OneShot,
@@ -715,7 +705,7 @@ func TestFlowMetricsStep(t *testing.T) {
 			time.Sleep(time.Second * 30)
 			return nil
 		}, func(c *CheckContext) error {
-			gremlin := g.G.Context(c.startTime, c.startTime.Unix()-c.setupTime.Unix()+5).V().Has("Name", "br-fms", "Type", "ovsbridge").Flows()
+			gremlin := g.G.Context(c.startTime, c.startTime.Unix()-c.setupTime.Unix()+5).V().Has("Name", "fms-intf1", "Type", "veth").Flows()
 
 			metric, err := c.gh.GetFlowMetric(gremlin.Has("LayersPath", "Ethernet/IPv4/ICMPv4").Dedup().Metrics().Sum())
 			if err != nil {
@@ -2030,7 +2020,7 @@ func TestSFlowCapture(t *testing.T) {
 			{"ip netns exec sfct-vm2 ip address add 169.254.29.12/24 dev sfct-intf2", true},
 			{"ip netns exec sfct-vm2 ip link set sfct-intf2 up", true},
 
-			{"ovs-vsctl --id=@sflow create sflow agent=lo target=\"127.0.0.1:6343\" header=128 sampling=1 polling=0 -- set bridge br-sfct sflow=@sflow", true},
+			{"ovs-vsctl --id=@sflow create sflow agent=lo target=\"127.0.0.1:6343\" header=128 sampling=1 polling=10 -- set bridge br-sfct sflow=@sflow", true},
 		},
 
 		injections: []TestInjection{{

@@ -1,22 +1,17 @@
 /*
  * Copyright (C) 2016 Red Hat, Inc.
  *
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy ofthe License at
  *
- *  http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specificlanguage governing permissions and
+ * limitations under the License.
  *
  */
 
@@ -147,8 +142,7 @@ func (fb *Probe) Start() {
 
 	fb.Graph.AddEventListener(fb)
 
-	list := config.GetStringSlice("analyzer.topology.fabric")
-	for _, link := range list {
+	for _, link := range config.GetStringSlice("analyzer.topology.fabric") {
 		l2OnlyLink := false
 		pc := strings.Split(link, "-->")
 		if len(pc) == 2 {
@@ -237,11 +231,13 @@ func (fb *Probe) Stop() {
 }
 
 // NewProbe creates a new probe to enhance the graph
-func NewProbe(g *graph.Graph) *Probe {
-	fb := &Probe{
-		Graph: g,
-		links: make(map[*graph.Node][]fabricLink),
+func NewProbe(g *graph.Graph) (*Probe, error) {
+	if _, ok := config.Get("analyzer.topology.fabric").([]interface{}); config.IsSet("analyzer.topology.fabric") && !ok {
+		return nil, fmt.Errorf("Fabric configuration should be a list of entries")
 	}
 
-	return fb
+	return &Probe{
+		Graph: g,
+		links: make(map[*graph.Node][]fabricLink),
+	}, nil
 }

@@ -1,22 +1,17 @@
 /*
  * Copyright (C) 2015 Red Hat, Inc.
  *
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy ofthe License at
  *
- *  http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specificlanguage governing permissions and
+ * limitations under the License.
  *
  */
 
@@ -87,9 +82,10 @@ agent:
       - ovsdb
       - docker
       - lxd
-      - opencontrail
       - lldp
       - runc
+      - socketinfo
+      {{.OpencontrailProbe}}
     netlink:
       metrics_update: 5
     lldp:
@@ -105,6 +101,18 @@ agent:
         value: 1
       - name: last
         value: 10
+    myarrays:
+      integers:
+      - 1
+      - 2
+      - 3
+      bools:
+      - true
+      - true
+      strings:
+      - dog
+      - cat
+      - frog
 
 flow:
   expire: 600
@@ -219,6 +227,7 @@ var (
 	noOFTests         bool
 	standalone        bool
 	topologyBackend   string
+	opencontrailProbe bool
 )
 
 func initConfig(conf string, params ...helperParams) error {
@@ -267,6 +276,9 @@ func initConfig(conf string, params ...helperParams) error {
 	}
 	if analyzerProbes != "" {
 		params[0]["AnalyzerProbes"] = strings.Split(analyzerProbes, ",")
+	}
+	if opencontrailProbe {
+		params[0]["OpencontrailProbe"] = "- opencontrail"
 	}
 
 	tmpl, err := template.New("config").Parse(conf)
@@ -500,6 +512,9 @@ func RunTest(t *testing.T, test *Test) {
 		context.postmortem(t, test, time.Now())
 		t.Fatalf("Failed to setup captures: %s", err)
 	}
+
+	// wait a bit after the capture creation
+	time.Sleep(2 * time.Second)
 
 	retries := test.retries
 	if retries <= 0 {
@@ -782,6 +797,7 @@ func init() {
 	flag.StringVar(&flowBackend, "analyzer.flow.backend", "", "Specify the flow storage backend used")
 	flag.StringVar(&analyzerListen, "analyzer.listen", "0.0.0.0:64500", "Specify the analyzer listen address")
 	flag.StringVar(&analyzerProbes, "analyzer.topology.probes", "", "Specify the analyzer probes to enable")
+	flag.BoolVar(&opencontrailProbe, "opencontrail", false, "Enable opencontrail probe")
 	flag.Parse()
 
 	http.DefaultTransport.(*http.Transport).MaxIdleConnsPerHost = 100

@@ -1,22 +1,17 @@
 /*
  * Copyright (C) 2017 Red Hat, Inc.
  *
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy ofthe License at
  *
- *  http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specificlanguage governing permissions and
+ * limitations under the License.
  *
  */
 
@@ -207,8 +202,13 @@ func NewMetadataIndexer(g *Graph, listenerHandler ListenerHandler, m ElementMatc
 		Indexer: NewIndexer(g, listenerHandler, func(n *Node) (kv map[string]interface{}) {
 			if match := n.MatchMetadata(m); match {
 				kv = make(map[string]interface{})
-				if values, err := getFieldsAsArray(n, indexes); err == nil && len(indexes) == len(values) {
-					kv[Hash(values...)] = values
+				values, err := getFieldsAsArray(n, indexes)
+				if err == nil {
+					for _, fields := range values {
+						if len(indexes) == len(fields) {
+							kv[Hash(fields...)] = fields
+						}
+					}
 				}
 			}
 			return

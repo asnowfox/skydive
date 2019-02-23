@@ -1,22 +1,17 @@
 /*
  * Copyright (C) 2018 Red Hat, Inc.
  *
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy ofthe License at
  *
- *  http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specificlanguage governing permissions and
+ * limitations under the License.
  *
  */
 
@@ -33,6 +28,7 @@ import (
 
 const (
 	defaultAggregatesSliceLength = int64(30000) // 30 seconds
+	aggregatesMaxSlices          = 10000
 )
 
 // MetricsTraversalExtension describes a new extension to enhance the topology
@@ -43,6 +39,7 @@ type MetricsTraversalExtension struct {
 // MetricsGremlinTraversalStep describes the Metrics gremlin traversal step
 type MetricsGremlinTraversalStep struct {
 	traversal.GremlinTraversalContext
+	key string
 }
 
 // NewMetricsTraversalExtension returns a new graph traversal extension
@@ -65,16 +62,38 @@ func (e *MetricsTraversalExtension) ScanIdent(s string) (traversal.Token, bool) 
 func (e *MetricsTraversalExtension) ParseStep(t traversal.Token, p traversal.GremlinTraversalContext) (traversal.GremlinTraversalStep, error) {
 	switch t {
 	case e.MetricsToken:
-		return &MetricsGremlinTraversalStep{GremlinTraversalContext: p}, nil
+	default:
+		return nil, nil
 	}
-	return nil, nil
+	var key string
+	switch len(p.Params) {
+	case 0:
+		key = "LastUpdateMetric"
+	case 1:
+		k, ok := p.Params[0].(string)
+		if !ok {
+			return nil, errors.New("Metrics parameter have to be a string")
+		}
+		switch k {
+		case "LastUpdateMetric":
+			key = k
+		case "SFlow.LastUpdateMetric", "SFlow":
+			key = "SFlow.LastUpdateMetric"
+		default:
+			return nil, fmt.Errorf("Metric field unknown : %v", p.Params)
+		}
+	default:
+		return nil, fmt.Errorf("Metrics accepts one parameter : %v", p.Params)
+	}
+
+	return &MetricsGremlinTraversalStep{GremlinTraversalContext: p, key: key}, nil
 }
 
 // Exec executes the metrics step
 func (s *MetricsGremlinTraversalStep) Exec(last traversal.GraphTraversalStep) (traversal.GraphTraversalStep, error) {
 	switch tv := last.(type) {
 	case *traversal.GraphTraversalV:
-		return InterfaceMetrics(s.StepContext, tv), nil
+		return InterfaceMetrics(s.StepContext, tv, s.key), nil
 	case *FlowTraversalStep:
 		return tv.FlowMetrics(s.StepContext), nil
 	}
@@ -243,6 +262,10 @@ func (m *MetricsTraversalStep) Aggregates(ctx traversal.StepContext, s ...interf
 	steps := (last - start) / sliceLength
 	if (last-start)%sliceLength != 0 {
 		steps++
+	}
+
+	if steps > aggregatesMaxSlices {
+		return NewMetricsTraversalStepFromError(fmt.Errorf("Aggregates available slices exceeded: %d/%d", steps, aggregatesMaxSlices))
 	}
 
 	aggregated := make([]common.Metric, steps, steps)

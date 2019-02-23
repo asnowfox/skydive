@@ -1,22 +1,17 @@
 /*
  * Copyright (C) 2017 Orange.
  *
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy ofthe License at
  *
- *  http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specificlanguage governing permissions and
+ * limitations under the License.
  *
  */
 
@@ -38,6 +33,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/skydive-project/skydive/topology"
 
 	uuid "github.com/nu7hatch/gouuid"
 	"github.com/skydive-project/skydive/common"
@@ -310,7 +307,9 @@ func makeFilter(rule *Rule) string {
 // Execute exposes an interface to command launch on the OS
 type Execute interface {
 	ExecCommand(string, ...string) ([]byte, error)
-	ExecCommandPipe(context.Context, string, ...string) (io.Reader, error)
+	ExecCommandPipe(context.Context, string, ...string) (io.Reader, interface {
+		Wait() error
+	}, error)
 }
 
 // RealExecute is the actual implementation given below. It can be overridden for tests.
@@ -326,20 +325,22 @@ func (r RealExecute) ExecCommand(com string, args ...string) ([]byte, error) {
 }
 
 // ExecCommandPipe executes a command on a host and gives back a pipe to control it.
-func (r RealExecute) ExecCommandPipe(ctx context.Context, com string, args ...string) (io.Reader, error) {
+func (r RealExecute) ExecCommandPipe(ctx context.Context, com string, args ...string) (io.Reader, interface {
+	Wait() error
+}, error) {
 	/* #nosec */
 	command := exec.CommandContext(ctx, com, args...)
 	out, err := command.StdoutPipe()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	command.Stderr = command.Stdout
 	if err = command.Start(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	return out, err
+	return out, command, err
 }
 
 // launchOnSwitch launches a command on a given switch
@@ -361,7 +362,7 @@ func launchContinuousOnSwitch(ctx context.Context, cmd []string) (<-chan string,
 		logging.GetLogger().Debugf("Launching continusously %v", cmd)
 		for ctx.Err() == nil {
 			retry := func() error {
-				out, err := executor.ExecCommandPipe(ctx, cmd[0], cmd[1:]...)
+				out, com, err := executor.ExecCommandPipe(ctx, cmd[0], cmd[1:]...)
 				if err != nil {
 					logging.GetLogger().Errorf("Can't execute command %v: %s", cmd, err)
 					return nil
@@ -371,19 +372,22 @@ func launchContinuousOnSwitch(ctx context.Context, cmd []string) (<-chan string,
 				for ctx.Err() == nil {
 					line, err := reader.ReadString('\n')
 					if err == io.EOF {
+						com.Wait()
 						break
 					} else if err != nil {
 						logging.GetLogger().Errorf("IO Error on command %v: %s", cmd, err)
+						// Should return but there may be weird cases.
+						go com.Wait()
 						break
 					} else {
 						if strings.Contains(line, "is not a bridge or a socket") {
 							reader.Discard(int(^uint(0) >> 1))
+							com.Wait()
 							return errors.New("Not a bridge or a socket")
 						}
 						cout <- line
 					}
 				}
-
 				return nil
 			}
 			if err := common.Retry(retry, 100, 50*time.Millisecond); err != nil {
@@ -513,7 +517,8 @@ func (probe *BridgeOfProbe) addRule(rule *Rule) {
 		logging.GetLogger().Error(err)
 		return
 	}
-	if _, err := g.Link(bridgeNode, ruleNode, graph.Metadata{"RelationType": "ownership"}); err != nil {
+
+	if _, err := topology.AddOwnershipLink(g, bridgeNode, ruleNode, nil); err != nil {
 		logging.GetLogger().Error(err)
 	}
 }
@@ -554,7 +559,7 @@ func (probe *BridgeOfProbe) addGroup(group *Group) {
 		return
 	}
 	probe.Groups[group.ID] = groupNode
-	if _, err := g.Link(bridgeNode, groupNode, graph.Metadata{"RelationType": "ownership"}); err != nil {
+	if _, err := topology.AddOwnershipLink(g, bridgeNode, groupNode, nil); err != nil {
 		logging.GetLogger().Error(err)
 	}
 }
@@ -734,7 +739,7 @@ func (probe *BridgeOfProbe) monitorGroup() error {
 	}
 	if _, err = launchOnSwitch(command); err != nil {
 		logging.GetLogger().Warningf("OpenFlow 1.5 not supported on %s", probe.Bridge)
-		return err
+		return nil
 	}
 	randBytes := make([]byte, 16)
 	rand.Read(randBytes)

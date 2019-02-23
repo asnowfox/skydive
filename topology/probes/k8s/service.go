@@ -1,22 +1,17 @@
 /*
  * Copyright (C) 2018 IBM, Inc.
  *
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy ofthe License at
  *
- *  http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specificlanguage governing permissions and
+ * limitations under the License.
  *
  */
 
@@ -26,11 +21,9 @@ import (
 	"fmt"
 
 	"github.com/skydive-project/skydive/graffiti/graph"
-	"github.com/skydive-project/skydive/logging"
 	"github.com/skydive-project/skydive/probe"
 
-	v1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -60,79 +53,18 @@ func newServiceProbe(client interface{}, g *graph.Graph) Subprobe {
 	return NewResourceCache(client.(*kubernetes.Clientset).Core().RESTClient(), &v1.Service{}, "services", g, &serviceHandler{})
 }
 
-type servicePodLinker struct {
-	graph        *graph.Graph
-	serviceCache *ResourceCache
-	podCache     *ResourceCache
-}
-
-func (spl *servicePodLinker) newEdgeMetadata() graph.Metadata {
-	m := NewEdgeMetadata(Manager, "association")
-	m.SetField("RelationType", "service")
-	return m
-}
-
-func (spl *servicePodLinker) GetABLinks(srvNode *graph.Node) (edges []*graph.Edge) {
-	if srv := spl.serviceCache.GetByNode(srvNode); srv != nil {
-		srv := srv.(*v1.Service)
-		labelSelector := &metav1.LabelSelector{MatchLabels: srv.Spec.Selector}
-		selectedPods := objectsToNodes(spl.graph, spl.podCache.getBySelector(spl.graph, srv.Namespace, labelSelector))
-		metadata := spl.newEdgeMetadata()
-		for _, podNode := range selectedPods {
-			id := graph.GenID(string(srvNode.ID), string(podNode.ID), "RelationType", "service")
-
-			edge, err := spl.graph.NewEdge(id, srvNode, podNode, metadata, "")
-			if err != nil {
-				logging.GetLogger().Error(err)
-				continue
-			}
-
-			edges = append(edges, edge)
-		}
-	}
-	return
-}
-
-func (spl *servicePodLinker) GetBALinks(podNode *graph.Node) (edges []*graph.Edge) {
-	namespace, _ := podNode.GetFieldString(MetadataField("Namespace"))
-	name, _ := podNode.GetFieldString(MetadataField("Name"))
-	pod := spl.podCache.getByKey(namespace, name)
-	for _, srv := range spl.serviceCache.getByNamespace(namespace) {
-		srv := srv.(*v1.Service)
-		labelSelector := &metav1.LabelSelector{MatchLabels: srv.Spec.Selector}
-		if len(filterObjectsBySelector([]interface{}{pod}, labelSelector)) != 1 {
-			continue
-		}
-		if srvNode := spl.graph.GetNode(graph.Identifier(srv.GetUID())); srvNode != nil {
-			edges = append(edges, spl.graph.CreateEdge("", srvNode, podNode, spl.newEdgeMetadata(), graph.TimeUTC(), ""))
-		}
-	}
-	return
+func servicePodAreLinked(a, b interface{}) bool {
+	return matchMapSelector(b.(*v1.Pod), a.(*v1.Service).Spec.Selector)
 }
 
 func newServicePodLinker(g *graph.Graph) probe.Probe {
-	serviceProbe := GetSubprobe(Manager, "service")
-	podProbe := GetSubprobe(Manager, "pod")
-	if serviceProbe == nil || podProbe == nil {
-		return nil
-	}
+	return NewABLinker(g, Manager, "service", Manager, "pod", servicePodAreLinked)
+}
 
-	rl := graph.NewResourceLinker(
-		g,
-		[]graph.ListenerHandler{serviceProbe},
-		[]graph.ListenerHandler{podProbe},
-		&servicePodLinker{
-			graph:        g,
-			serviceCache: serviceProbe.(*ResourceCache),
-			podCache:     podProbe.(*ResourceCache),
-		},
-		graph.Metadata{"RelationType": "service"},
-	)
+func serviceEndpointsAreLinked(a, b interface{}) bool {
+	return matchMapSelector(b.(*v1.Endpoints), a.(*v1.Service).Spec.Selector)
+}
 
-	linker := &Linker{
-		ResourceLinker: rl,
-	}
-	rl.AddEventListener(linker)
-
-	return linker
+func newServiceEndpointsLinker(g *graph.Graph) probe.Probe {
+	return NewABLinker(g, Manager, "service", Manager, "endpoints", serviceEndpointsAreLinked)
 }

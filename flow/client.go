@@ -1,22 +1,17 @@
 /*
  * Copyright (C) 2016 Red Hat, Inc.
  *
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy ofthe License at
  *
- *  http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specificlanguage governing permissions and
+ * limitations under the License.
  *
  */
 
@@ -44,19 +39,18 @@ type WSTableClient struct {
 }
 
 func (f *WSTableClient) lookupFlows(flowset chan *FlowSet, host string, flowSearchQuery filters.SearchQuery) {
-	obj, _ := proto.Marshal(&flowSearchQuery)
-	tq := TableQuery{Type: "SearchQuery", Obj: obj}
+	tq := &TableQuery{Type: "SearchQuery", Query: &flowSearchQuery}
 	msg := ws.NewStructMessage(Namespace, "TableQuery", tq)
 
 	resp, err := f.structServer.Request(host, msg, ws.DefaultRequestTimeout)
 	if err != nil {
-		logging.GetLogger().Errorf("Unable to send message to agent %s: %s", host, err.Error())
+		logging.GetLogger().Errorf("Unable to send message to agent %s: %s", host, err)
 		flowset <- NewFlowSet()
 		return
 	}
 
 	var reply TableReply
-	if resp == nil || resp.UnmarshalObj(&reply) != nil {
+	if resp == nil || proto.Unmarshal(resp.Obj, &reply) != nil {
 		logging.GetLogger().Errorf("Error returned while reading TableReply from: %s", host)
 		flowset <- NewFlowSet()
 	}
@@ -69,13 +63,14 @@ func (f *WSTableClient) lookupFlows(flowset chan *FlowSet, host string, flowSear
 		Dedup:     flowSearchQuery.Dedup,
 		DedupBy:   flowSearchQuery.DedupBy,
 	}
-	for _, b := range reply.Obj {
-		var fsr FlowSearchReply
-		if err := proto.Unmarshal(b, &fsr); err != nil {
-			logging.GetLogger().Errorf("Unable to decode flow search reply from: %s", host)
-			continue
+	for _, b := range reply.FlowSetBytes {
+		var f FlowSet
+		if err := f.Unmarshal(b); err != nil {
+			logging.GetLogger().Errorf("Error returned while reading TableReply from: %s", host)
+			flowset <- NewFlowSet()
 		}
-		fs.Merge(fsr.FlowSet, context)
+
+		fs.Merge(&f, context)
 	}
 	flowset <- fs
 }

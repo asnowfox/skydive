@@ -1,34 +1,27 @@
 /*
  * Copyright (C) 2016 Red Hat, Inc.
  *
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy ofthe License at
  *
- *  http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specificlanguage governing permissions and
+ * limitations under the License.
  *
  */
 
 package flow
 
 import (
-	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/golang/protobuf/proto"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 
@@ -37,22 +30,8 @@ import (
 	"github.com/skydive-project/skydive/logging"
 )
 
-// TableQuery contains a type and a query obj as an array of bytes.
-// The query can be encoded in different ways according the type.
-type TableQuery struct {
-	Type string
-	Obj  []byte
-}
-
-// TableReply is the response to a TableQuery containing a Status and an array
-// of replies that can be encoded in many ways, ex: json, protobuf.
-type TableReply struct {
-	Obj    [][]byte
-	status int
-}
-
 // ExpireUpdateFunc defines expire and updates callback
-type ExpireUpdateFunc func(f []*Flow)
+type ExpireUpdateFunc func(f *FlowArray)
 
 // Handler defines a flow callback called every time
 type Handler struct {
@@ -80,46 +59,63 @@ type TableOpts struct {
 
 // Table store the flow table and related metrics mechanism
 type Table struct {
-	Opts          TableOpts
-	packetSeqChan chan *PacketSequence
-	flowChan      chan *Flow
-	table         map[string]*Flow
-	flush         chan bool
-	flushDone     chan bool
-	query         chan *TableQuery
-	reply         chan *TableReply
-	state         int64
-	lockState     common.RWMutex
-	wg            sync.WaitGroup
-	quit          chan bool
-	updateHandler *Handler
-	lastUpdate    int64
-	updateVersion int64
-	expireHandler *Handler
-	lastExpire    int64
-	nodeTID       string
-	ipDefragger   *IPDefragger
-	tcpAssembler  *TCPAssembler
-	flowOpts      Opts
-	appPortMap    *ApplicationPortMap
+	Opts              TableOpts
+	packetSeqChan     chan *PacketSequence
+	flowChanOperation chan *Operation
+	table             map[string]*Flow
+	flush             chan bool
+	flushDone         chan bool
+	query             chan *TableQuery
+	reply             chan []byte
+	state             int64
+	lockState         common.RWMutex
+	wg                sync.WaitGroup
+	quit              chan bool
+	updateHandler     *Handler
+	lastUpdate        int64
+	updateVersion     int64
+	expireHandler     *Handler
+	lastExpire        int64
+	nodeTID           string
+	ipDefragger       *IPDefragger
+	tcpAssembler      *TCPAssembler
+	flowOpts          Opts
+	appPortMap        *ApplicationPortMap
+}
+
+// OperationType operation type of a Flow in a flow table
+type OperationType int
+
+const (
+	// ReplaceOperation replace the flow
+	ReplaceOperation OperationType = iota
+	// UpdateOperation update the flow
+	UpdateOperation
+)
+
+// Operation describes a flow operation
+type Operation struct {
+	Key  string
+	Flow *Flow
+	Type OperationType
 }
 
 // NewTable creates a new flow table
 func NewTable(updateHandler *Handler, expireHandler *Handler, nodeTID string, opts ...TableOpts) *Table {
 	t := &Table{
-		packetSeqChan: make(chan *PacketSequence, 1000),
-		flowChan:      make(chan *Flow, 1000),
-		table:         make(map[string]*Flow),
-		flush:         make(chan bool),
-		flushDone:     make(chan bool),
-		state:         common.StoppedState,
-		quit:          make(chan bool),
-		updateHandler: updateHandler,
-		expireHandler: expireHandler,
-		nodeTID:       nodeTID,
-		ipDefragger:   NewIPDefragger(),
-		tcpAssembler:  NewTCPAssembler(),
-		appPortMap:    NewApplicationPortMapFromConfig(),
+		packetSeqChan:     make(chan *PacketSequence, 1000),
+		flowChanOperation: make(chan *Operation, 1000),
+		table:             make(map[string]*Flow),
+		flush:             make(chan bool),
+		flushDone:         make(chan bool),
+		state:             common.StoppedState,
+		quit:              make(chan bool),
+		updateHandler:     updateHandler,
+		expireHandler:     expireHandler,
+		nodeTID:           nodeTID,
+		ipDefragger:       NewIPDefragger(),
+		tcpAssembler:      NewTCPAssembler(),
+		appPortMap:        NewApplicationPortMapFromConfig(),
 	}
 	if len(opts) > 0 {
 		t.Opts = opts[0]
@@ -199,6 +195,7 @@ func (ft *Table) expire(expireBefore int64) {
 			}
 
 			logging.GetLogger().Debugf("Expire flow %s Duration %v", f.UUID, duration)
+			f.FinishType = FlowFinishType_TIMEOUT
 			expiredFlows = append(expiredFlows, f)
 
 			// need to use the key as the key could be not equal to the UUID
@@ -207,7 +204,7 @@ func (ft *Table) expire(expireBefore int64) {
 	}
 
 	/* Advise Clients */
-	ft.expireHandler.callback(expiredFlows)
+	ft.expireHandler.callback(&FlowArray{Flows: expiredFlows})
 
 	flowTableSz := len(ft.table)
 	logging.GetLogger().Debugf("Expire Flow : removed %v ; new size %v", flowTableSzBefore-flowTableSz, flowTableSz)
@@ -248,10 +245,13 @@ func (ft *Table) update(updateFrom, updateTime int64) {
 	logging.GetLogger().Debugf("flow table update: %d, %d", updateFrom, updateTime)
 
 	var updatedFlows []*Flow
-	for _, f := range ft.table {
+	for k, f := range ft.table {
 		if f.XXX_state.updateVersion > ft.updateVersion {
 			ft.updateMetric(f, updateFrom, updateTime)
 			updatedFlows = append(updatedFlows, f)
+			if f.FinishType != FlowFinishType_NOT_FINISHED {
+				delete(ft.table, k)
+			}
 		} else {
 			f.LastUpdateMetric = &FlowMetric{Start: updateFrom, Last: updateTime}
 		}
@@ -261,7 +261,7 @@ func (ft *Table) update(updateFrom, updateTime int64) {
 
 	if len(updatedFlows) != 0 {
 		/* Advise Clients */
-		ft.updateHandler.callback(updatedFlows)
+		ft.updateHandler.callback(&FlowArray{Flows: updatedFlows})
 		logging.GetLogger().Debugf("Send updated Flows: %d", len(updatedFlows))
 
 		// cleanup raw packets
@@ -283,52 +283,25 @@ func (ft *Table) expireAt(now time.Time) {
 	ft.lastExpire = common.UnixMillis(now)
 }
 
-func (ft *Table) onSearchQueryMessage(fsq *filters.SearchQuery) (*FlowSearchReply, int) {
-	flowset := ft.getFlows(fsq)
-	if len(flowset.Flows) == 0 {
-		return &FlowSearchReply{
-			FlowSet: flowset,
-		}, http.StatusNoContent
-	}
-
-	return &FlowSearchReply{
-		FlowSet: flowset,
-	}, http.StatusOK
-}
-
-func (ft *Table) onQuery(query *TableQuery) *TableReply {
-	reply := &TableReply{
-		status: http.StatusBadRequest,
-		Obj:    make([][]byte, 0),
-	}
-
-	switch query.Type {
+func (ft *Table) onQuery(tq *TableQuery) []byte {
+	switch tq.Type {
 	case "SearchQuery":
-		var fsq filters.SearchQuery
-		if err := proto.Unmarshal(query.Obj, &fsq); err != nil {
-			logging.GetLogger().Errorf("Unable to decode the flow search query: %s", err)
-			break
+		fs := ft.getFlows(tq.Query)
+
+		// marshal early to avoid race outside of query loop
+		b, err := fs.Marshal()
+		if err != nil {
+			return nil
 		}
 
-		fsr, status := ft.onSearchQueryMessage(&fsq)
-		if status != http.StatusOK {
-			reply.status = status
-			break
-		}
-		pb, _ := proto.Marshal(fsr)
-
-		// TableReply returns an array of replies so in that case an array of
-		// protobuf replies
-		reply.Obj = append(reply.Obj, pb)
-
-		reply.status = http.StatusOK
+		return b
 	}
 
-	return reply
+	return nil
 }
 
 // Query a flow table
-func (ft *Table) Query(query *TableQuery) *TableReply {
+func (ft *Table) Query(query *TableQuery) []byte {
 	ft.lockState.Lock()
 	defer ft.lockState.Unlock()
 
@@ -401,13 +374,36 @@ func (ft *Table) processPacketSeq(ps *PacketSequence) {
 	}
 }
 
-func (ft *Table) processFlow(fl *Flow) {
-	prev := ft.replaceFlow(fl.UUID, fl)
-	if prev != nil {
-		fl.LastUpdateMetric = prev.LastUpdateMetric
+func (ft *Table) processFlowOP(op *Operation) {
+	switch op.Type {
+	case ReplaceOperation:
+		fl := op.Flow
 
-		fl.XXX_state = prev.XXX_state
-		fl.XXX_state.updateVersion = ft.updateVersion + 1
+		prev := ft.replaceFlow(op.Key, fl)
+		if prev != nil {
+			fl.LastUpdateMetric = prev.LastUpdateMetric
+
+			fl.XXX_state = prev.XXX_state
+			fl.XXX_state.updateVersion = ft.updateVersion + 1
+		}
+	case UpdateOperation:
+		fl := ft.table[op.Key]
+		if fl == nil {
+			return
+		}
+
+		// NOTE(safchain) keep it simple for now. Need to add TCPMetric and some
+		// other metrics.
+		fl.Metric.ABBytes += op.Flow.Metric.ABBytes
+		fl.Metric.BABytes += op.Flow.Metric.BABytes
+		fl.Metric.ABPackets += op.Flow.Metric.ABPackets
+		fl.Metric.BAPackets += op.Flow.Metric.BAPackets
+
+		fl.Last = op.Flow.Last
+
+		if fl.RTT == 0 && fl.Metric.ABPackets > 0 && fl.Metric.BAPackets > 0 {
+			fl.RTT = fl.Last - fl.Start
+		}
 	}
 }
 
@@ -437,7 +433,7 @@ func (ft *Table) Run() {
 	defer nowTicker.Stop()
 
 	ft.query = make(chan *TableQuery, 100)
-	ft.reply = make(chan *TableReply, 100)
+	ft.reply = make(chan []byte, 100)
 
 	atomic.StoreInt64(&ft.state, common.RunningState)
 	for {
@@ -459,8 +455,8 @@ func (ft *Table) Run() {
 			}
 		case ps := <-ft.packetSeqChan:
 			ft.processPacketSeq(ps)
-		case fl := <-ft.flowChan:
-			ft.processFlow(fl)
+		case op := <-ft.flowChanOperation:
+			ft.processFlowOP(op)
 		case now := <-ctTicker.C:
 			t := now.Add(-ctDuration)
 			ft.tcpAssembler.FlushOlderThan(t)
@@ -492,9 +488,9 @@ func (ft *Table) FeedWithSFlowSample(sample *layers.SFlowFlowSample, bpf *BPF) {
 }
 
 // Start the flow table
-func (ft *Table) Start() (chan *PacketSequence, chan *Flow) {
+func (ft *Table) Start() (chan *PacketSequence, chan *Operation) {
 	go ft.Run()
-	return ft.packetSeqChan, ft.flowChan
+	return ft.packetSeqChan, ft.flowChanOperation
 }
 
 // Stop the flow table
@@ -514,13 +510,13 @@ func (ft *Table) Stop() {
 			ft.processPacketSeq(ps)
 		}
 
-		for len(ft.flowChan) != 0 {
-			fl := <-ft.flowChan
-			ft.processFlow(fl)
+		for len(ft.flowChanOperation) != 0 {
+			op := <-ft.flowChanOperation
+			ft.processFlowOP(op)
 		}
 
 		close(ft.packetSeqChan)
-		close(ft.flowChan)
+		close(ft.flowChanOperation)
 	}
 
 	ft.expireNow()

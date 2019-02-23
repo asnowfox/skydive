@@ -170,10 +170,11 @@
       - string:
           name: REF
           default: "{ref}"
-          description: The tag or branch to build
+          description: "The tag or branch to build (ex: origin/pr/1234/merge for the PR 1234)"
       - string:
           name: REFSPEC
           default: "{refspec}"
+          description: "Refspec (ex: +refs/pull/*:refs/remotes/origin/pr/* for a PR, +refs/tags/*:refs/remotes/origin/tags/* for a tag)"
       - string:
           name: DRY_RUN
           default: "{dry-run}"
@@ -214,6 +215,8 @@
           url: https://github.com/skydive-project/skydive
       - inject:
           properties-content: MINIKUBE_DRIVER=virtualbox
+      - build-discarder:
+          artifact-num-to-keep: 100
     scm:
       - skydive-github:
           repository: "${REPOSITORY}"
@@ -743,6 +746,28 @@
       - skydive-cleanup
       - skydive-test:
           test: BACKEND=elasticsearch scripts/ci/run-functional-tests.sh
+    publishers:
+      - junit:
+          results: tests.xml
+      - chuck-norris
+
+- job:
+    name: 'skydive-functional-hw-tests'
+    defaults: skydive
+    parameters:
+      - skydive-default-parameters
+      - skydive-labels:
+          slave-name: baremetal
+    triggers:
+      - skydive-pull-request:
+          name: "functional-tests-ebpf"
+          trigger-prefix: "(all )?"
+          only-trigger-phrase: false
+          cancel-builds-on-update: true
+    builders:
+      - skydive-cleanup
+      - skydive-test:
+          test: BACKEND=elasticsearch WITH_EBPF=true TEST_PATTERN='\(EBPF\|SRIOV\)' TAGS="$TAGS sriov_tests" scripts/ci/run-functional-tests.sh
     publishers:
       - junit:
           results: tests.xml

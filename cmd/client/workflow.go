@@ -1,35 +1,27 @@
 /*
  * Copyright (C) 2018 Red Hat, Inc.
  *
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy ofthe License at
  *
- *  http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specificlanguage governing permissions and
+ * limitations under the License.
  *
  */
 
 package client
 
 import (
-	"fmt"
 	"io/ioutil"
 	"os"
 
 	"gopkg.in/yaml.v2"
-
-	"github.com/robertkrimen/otto"
 
 	"github.com/skydive-project/skydive/api/client"
 	"github.com/skydive-project/skydive/api/types"
@@ -178,39 +170,15 @@ var WorkflowCall = &cobra.Command{
 		runtime.Start()
 		runtime.RegisterAPIClient(client)
 
-		result, err := runtime.Exec("(" + workflow.Source + ")")
-		if err != nil {
-			exitOnError(fmt.Errorf("Error while compile workflow %s: %s", workflow.Source, result.String()))
-		}
-
 		params := make([]interface{}, len(args)-1)
 		for i, arg := range args[1:] {
 			params[i] = arg
 		}
 
-		result, err = result.Call(result, params...)
+		result, err := runtime.ExecPromise(workflow.Source, params...)
 		if err != nil {
-			exitOnError(fmt.Errorf("Error while executing workflow: %s", result.String()))
+			exitOnError(err)
 		}
-
-		if !result.IsObject() {
-			exitOnError(fmt.Errorf("Workflow is expected to return a promise, returned %s", result.Class()))
-		}
-
-		done := make(chan otto.Value)
-		promise := result.Object()
-
-		finally, err := runtime.ToValue(func(call otto.FunctionCall) otto.Value {
-			result := call.Argument(0)
-			done <- result
-			return result
-		})
-
-		result, _ = promise.Call("then", finally)
-		promise = result.Object()
-		promise.Call("catch", finally)
-
-		result = <-done
 
 		runtime.Set("result", result)
 		runtime.Exec("console.log(JSON.stringify(result))")

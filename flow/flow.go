@@ -1,22 +1,17 @@
 /*
  * Copyright (C) 2015 Red Hat, Inc.
  *
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy ofthe License at
  *
- *  http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specificlanguage governing permissions and
+ * limitations under the License.
  *
  */
 
@@ -33,7 +28,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/golang/protobuf/proto"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	"github.com/spaolacci/murmur3"
@@ -506,28 +500,6 @@ func (f *Flow) UpdateUUID(key string, opts Opts) {
 	f.UUID = hex.EncodeToString(hasher.Sum(nil))
 }
 
-// FromData deserialize a protobuf message to a Flow
-func FromData(data []byte) (*Flow, error) {
-	flow := new(Flow)
-
-	err := proto.Unmarshal(data, flow)
-	if err != nil {
-		return nil, err
-	}
-
-	return flow, nil
-}
-
-// GetData serialize a Flow to a protobuf
-func (f *Flow) GetData() ([]byte, error) {
-	data, err := proto.Marshal(f)
-	if err != nil {
-		return []byte{}, err
-	}
-
-	return data, nil
-}
-
 // LinkType returns the Link type of the flow according the its first available layer.
 func (f *Flow) LinkType() (layers.LinkType, error) {
 	if f.Link != nil {
@@ -871,6 +843,13 @@ func (f *Flow) newTransportLayer(packet *Packet, opts Opts) error {
 
 		if opts.TCPMetric {
 			f.TCPMetric = &TCPMetric{}
+		}
+
+		if transportPacket.FIN {
+			f.FinishType = FlowFinishType_TCP_FIN
+		}
+		if transportPacket.RST {
+			f.FinishType = FlowFinishType_TCP_RST
 		}
 	} else if layer := packet.Layer(layers.LayerTypeUDP); layer != nil {
 		f.Transport = &TransportLayer{Protocol: FlowProtocol_UDP}

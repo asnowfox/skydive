@@ -1,22 +1,17 @@
 /*
  * Copyright (C) 2015 Red Hat, Inc.
  *
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy ofthe License at
  *
- *  http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specificlanguage governing permissions and
+ * limitations under the License.
  *
  */
 
@@ -26,22 +21,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
-	"os"
 	"reflect"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/skydive-project/skydive/api/types"
 	"github.com/skydive-project/skydive/common"
-	"github.com/skydive-project/skydive/config"
 	"github.com/skydive-project/skydive/graffiti/graph"
 	g "github.com/skydive-project/skydive/gremlin"
-	shttp "github.com/skydive-project/skydive/http"
 	"github.com/skydive-project/skydive/topology"
 	"github.com/skydive-project/skydive/topology/probes/netlink"
-	ws "github.com/skydive-project/skydive/websocket"
 )
 
 func TestBridgeOVS(t *testing.T) {
@@ -344,6 +333,52 @@ func TestNameSpaceVeth(t *testing.T) {
 	RunTest(t, test)
 }
 
+func TestNameSpaceTwoVeth(t *testing.T) {
+	test := &Test{
+		setupCmds: []Cmd{
+			{"ip netns add ns1", true},
+			{"ip netns add ns2", true},
+			{"ip l add vm1-veth0 type veth peer name vm2-veth0 netns ns1", true},
+			{"ip l set vm1-veth0 netns ns2", true},
+		},
+
+		tearDownCmds: []Cmd{
+			{"ip netns exec ns1 ip link del vm2-veth0", true},
+			{"ip netns del ns1", true},
+			{"ip netns del ns2", true},
+		},
+
+		mode: Replay,
+
+		checks: []CheckFunction{func(c *CheckContext) error {
+			gh := c.gh
+			prefix := c.gremlin
+
+			nodes, err := gh.GetNodes(prefix.V().Has("LinkNetNsName", "ns1"))
+			if err != nil {
+				return err
+			}
+
+			if len(nodes) != 1 {
+				return fmt.Errorf("Expected 1 node, got %+v", nodes)
+			}
+
+			nodes, err = gh.GetNodes(prefix.V().Has("LinkNetNsName", "ns2"))
+			if err != nil {
+				return err
+			}
+
+			if len(nodes) != 1 {
+				return fmt.Errorf("Expected 1 node, got %+v", nodes)
+			}
+
+			return nil
+		}},
+	}
+
+	RunTest(t, test)
+}
+
 func TestNameSpaceOVSInterface(t *testing.T) {
 	test := &Test{
 		setupCmds: []Cmd{
@@ -567,110 +602,6 @@ func TestOVSOwnershipLink(t *testing.T) {
 	RunTest(t, test)
 }
 
-type TopologyInjecter struct {
-	ws.DefaultSpeakerEventHandler
-	connected int32
-}
-
-func (t *TopologyInjecter) OnConnected(c ws.Speaker) {
-	atomic.StoreInt32(&t.connected, 1)
-}
-
-func TestQueryMetadata(t *testing.T) {
-	test := &Test{
-		setupFunction: func(c *TestContext) error {
-			authOptions := &shttp.AuthenticationOpts{}
-			addresses, err := config.GetAnalyzerServiceAddresses()
-			if err != nil || len(addresses) == 0 {
-				return fmt.Errorf("Unable to get the analyzers list: %s", err.Error())
-			}
-
-			hostname, _ := os.Hostname()
-			wspool := ws.NewStructClientPool("TestQueryMetadata")
-			for _, sa := range addresses {
-				client := ws.NewClient(hostname+"-cli", common.UnknownService, config.GetURL("ws", sa.Addr, sa.Port, "/ws/publisher"), authOptions, http.Header{}, 1000, true, nil)
-				wspool.AddClient(client)
-			}
-
-			masterElection := ws.NewMasterElection(wspool)
-
-			eventHandler := &TopologyInjecter{}
-			wspool.AddEventHandler(eventHandler)
-			wspool.ConnectAll()
-
-			err = common.Retry(func() error {
-				if atomic.LoadInt32(&eventHandler.connected) != 1 {
-					return errors.New("Not connected through WebSocket")
-				}
-				return nil
-			}, 10, time.Second)
-
-			if err != nil {
-				return err
-			}
-
-			m := graph.Metadata{
-				"A": map[string]interface{}{
-					"B": map[string]interface{}{
-						"C": 123,
-						"D": []interface{}{1, 2, 3},
-						"E": []interface{}{"a", "b", "c"},
-					},
-					"F": map[string]interface{}{
-						"G": 123,
-						"H": []interface{}{true, true},
-					},
-				},
-			}
-			n := graph.CreateNode(graph.Identifier("123"), m, graph.TimeUTC(), "test", common.AgentService)
-
-			// The first message should be rejected as it has no 'Type' attribute
-			msg := ws.NewStructMessage(graph.Namespace, graph.NodeAddedMsgType, n)
-			masterElection.SendMessageToMaster(msg)
-
-			m.SetField("Type", "external")
-			m.SetField("Name", "testNode")
-
-			msg = ws.NewStructMessage(graph.Namespace, graph.NodeAddedMsgType, n)
-			masterElection.SendMessageToMaster(msg)
-
-			return nil
-		},
-
-		mode: Replay,
-
-		checks: []CheckFunction{func(c *CheckContext) error {
-			gh := c.gh
-			prefix := c.gremlin
-
-			_, err := gh.GetNode(prefix.V().Has("A.F.G", 123))
-			if err != nil {
-				return err
-			}
-
-			_, err = gh.GetNode(prefix.V().Has("A.B.C", 123))
-			if err != nil {
-				return err
-			}
-
-			_, err = gh.GetNode(prefix.V().Has("A.B.D", 1))
-			if err != nil {
-				return err
-			}
-
-			_, err = gh.GetNode(prefix.V().Has("A.B.E", "b"))
-			if err != nil {
-				return err
-			}
-
-			_, err = gh.GetNode(prefix.V().Has("A.F.H", true))
-			return err
-		}},
-	}
-
-	RunTest(t, test)
-}
-
 func TestNodeRuleCreate(t *testing.T) {
 	nodeRule := &types.NodeRule{
 		Action:   "create",
@@ -775,6 +706,7 @@ func TestEdgeRuleCreate(t *testing.T) {
 		setupCmds: []Cmd{
 			{"ovs-vsctl add-br br-srcnode", true},
 			{"ovs-vsctl add-br br-dstnode", true},
+			{"sleep 5", false},
 		},
 
 		setupFunction: func(c *TestContext) error {
@@ -799,7 +731,7 @@ func TestEdgeRuleCreate(t *testing.T) {
 				query = query.BothE().Has("RelationType", "layer2")
 				query = query.BothV().Has("Name", "br-dstnode", "Type", "ovsbridge")
 				if _, err := c.gh.GetNode(query); err != nil {
-					return errors.New("Failed to find a layer2 link")
+					return fmt.Errorf("Failed to find a layer2 link, error: %v", err)
 				}
 
 				return nil
@@ -832,10 +764,19 @@ func TestAgentMetadata(t *testing.T) {
 		checks: []CheckFunction{
 			func(c *CheckContext) error {
 				if _, err := c.gh.GetNode(c.gremlin.V().Has("mydict.value", 123)); err != nil {
-					return fmt.Errorf("Failed to find the host node with mydict.value metadata")
+					return err
 				}
 
-				return nil
+				if _, err := c.gh.GetNode(c.gremlin.V().Has("myarrays.integers", 1)); err != nil {
+					return err
+				}
+
+				if _, err := c.gh.GetNode(c.gremlin.V().Has("myarrays.strings", "cat")); err != nil {
+					return err
+				}
+
+				_, err := c.gh.GetNode(c.gremlin.V().Has("myarrays.bools", true))
+				return err
 			},
 		},
 	}
@@ -995,5 +936,94 @@ func TestInterfaceFeatures(t *testing.T) {
 			},
 		},
 	}
+	RunTest(t, test)
+}
+
+func TestSFlowMetric(t *testing.T) {
+	test := &Test{
+		setupCmds: []Cmd{
+			{"ovs-vsctl add-br br-sfmt", true},
+
+			{"ip netns add vm1", true},
+			{"ip link add vm1-eth0 type veth peer name eth0 netns vm1", true},
+			{"ip link set vm1-eth0 up", true},
+			{"ovs-vsctl add-port br-sfmt vm1-eth0", true},
+			{"ip netns exec vm1 ip link set eth0 up", true},
+			{"ip netns exec vm1 ip address add 192.168.0.11/24 dev eth0", true},
+			{"ip netns add vm2", true},
+			{"ip link add vm2-eth0 type veth peer name eth0 netns vm2", true},
+			{"ip link set vm2-eth0 up", true},
+			{"ovs-vsctl add-port br-sfmt vm2-eth0", true},
+			{"ip netns exec vm2 ip link set eth0 up", true},
+			{"ip netns exec vm2 ip address add 192.168.0.21/24 dev eth0", true},
+		},
+
+		injections: []TestInjection{{
+			from:  g.G.V().Has("Name", "vm1").Out().Has("Name", "eth0"),
+			to:    g.G.V().Has("Name", "vm2").Out().Has("Name", "eth0"),
+			count: 1,
+		}},
+
+		tearDownCmds: []Cmd{
+			{"ovs-vsctl del-br br-sfmt", true},
+			{"ip link set vm1-eth0 down", true},
+			{"ip link del vm1-eth0", true},
+			{"ip netns del vm1", true},
+			{"ip link set vm2-eth0 down", true},
+			{"ip link del vm2-eth0", true},
+			{"ip netns del vm2", true},
+		},
+
+		captures: []TestCapture{
+			{gremlin: g.G.V().Has("Type", "host").Out().Has("Name", "br-sfmt", "Type", "ovsbridge"), kind: "ovssflow"},
+		},
+
+		mode: OneShot,
+
+		checks: []CheckFunction{func(c *CheckContext) error {
+			sfmetrics, err := c.gh.GetSFlowMetrics(c.gremlin.V().Metrics("SFlow.LastUpdateMetric").Aggregates())
+			if err != nil {
+				return err
+			}
+
+			if len(sfmetrics) != 1 {
+				return fmt.Errorf("We should receive only one unique element in  Array of Metric, got: %d", len(sfmetrics))
+			}
+
+			if len(sfmetrics["Aggregated"]) < 1 {
+				return fmt.Errorf("Should have one or more metrics entry, got %+v", sfmetrics["Aggregated"])
+			}
+
+			var start, totalInUc int64
+			for _, m := range sfmetrics["Aggregated"] {
+				if m.GetStart() < start {
+					j, _ := json.MarshalIndent(sfmetrics, "", "\t")
+					return fmt.Errorf("Metrics not correctly sorted (%+v)", string(j))
+				}
+				start = m.GetStart()
+
+				inUc, _ := m.GetFieldInt64("IfInUcastPkts")
+				totalInUc += inUc
+			}
+
+			// due to ratio applied during the aggregation we can't expect to get exactly
+			// the sum of the metrics.
+			if totalInUc <= 1 {
+				return fmt.Errorf("Expected at least IfInUcastPkts, got %d", totalInUc)
+			}
+
+			m, err := c.gh.GetSFlowMetric(c.gremlin.V().Metrics("SFlow.LastUpdateMetric").Aggregates().Sum())
+			if err != nil {
+				return fmt.Errorf("Could not find metrics with: %s", "c.gremlin.V().Metrics('SFlow.LastUpdateMetric').Aggregates().Sum()")
+			}
+
+			if inUc, _ := m.GetFieldInt64("IfInUcastPkts"); inUc != totalInUc {
+				return fmt.Errorf("Sum error %d vs %d", totalInUc, inUc)
+			}
+
+			return nil
+		}},
+	}
+
 	RunTest(t, test)
 }

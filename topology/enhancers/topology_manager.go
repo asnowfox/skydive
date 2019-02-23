@@ -1,22 +1,17 @@
 /*
  * Copyright (C) 2018 Red Hat, Inc.
  *
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy ofthe License at
  *
- *  http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specificlanguage governing permissions and
+ * limitations under the License.
  *
  */
 
@@ -119,12 +114,15 @@ func (tm *TopologyManager) createEdge(edge *types.EdgeRule) error {
 		if !topology.HaveOwnershipLink(tm.graph, src[0], dst[0]) {
 			topology.AddOwnershipLink(tm.graph, src[0], dst[0], nil)
 		}
-	case "both":
-		if !topology.HaveLayer2Link(tm.graph, src[0], dst[0]) {
-			topology.AddLayer2Link(tm.graph, src[0], dst[0], edge.Metadata)
+	default:
+		// check nodes are already linked
+		if tm.graph.AreLinked(src[0], dst[0], graph.Metadata{"RelationType": edge.Metadata["RelationType"]}) {
+			return errors.New("Nodes are already linked")
 		}
-		if !topology.HaveOwnershipLink(tm.graph, src[0], dst[0]) {
-			topology.AddOwnershipLink(tm.graph, src[0], dst[0], nil)
+		id := graph.GenID(string(src[0].ID) + string(dst[0].ID) + edge.Metadata["RelationType"].(string))
+		_, err := tm.graph.NewEdge(id, src[0], dst[0], edge.Metadata)
+		if err != nil {
+			return err
 		}
 	}
 	return nil
@@ -227,27 +225,29 @@ func (tm *TopologyManager) handleNodeRuleRequest(action string, resource types.R
 	return nil
 }
 
-func (tm *TopologyManager) handleEdgeRuleRequest(action string, resource types.Resource) {
+func (tm *TopologyManager) handleEdgeRuleRequest(action string, resource types.Resource) error {
 	edge := resource.(*types.EdgeRule)
 	switch action {
 	case "create", "set":
-		tm.createEdge(edge)
+		return tm.createEdge(edge)
 	case "delete":
 		src := tm.getNodes(edge.Src)
 		dst := tm.getNodes(edge.Dst)
 		if len(src) < 1 || len(dst) < 1 {
 			logging.GetLogger().Errorf("Source or Destination node not found")
-			return
+			return nil
 		}
 
-		for {
-			if link := tm.graph.GetFirstLink(src[0], dst[0], edge.Metadata); link != nil {
-				tm.graph.DelEdge(link)
-			} else {
-				return
+		if link := tm.graph.GetFirstLink(src[0], dst[0], edge.Metadata); link != nil {
+			if err := tm.graph.DelEdge(link); err != nil {
+				logging.GetLogger().Errorf("Delete Edge failed, error: %v", err)
+				return nil
 			}
+		} else {
+			return nil
 		}
 	}
+	return nil
 }
 
 func (tm *TopologyManager) onAPIWatcherEvent(action string, id string, resource types.Resource) {
@@ -260,7 +260,9 @@ func (tm *TopologyManager) onAPIWatcherEvent(action string, id string, resource 
 		tm.graph.Unlock()
 	case *types.EdgeRule:
 		tm.graph.Lock()
-		tm.handleEdgeRuleRequest(action, resource)
+		if err := tm.handleEdgeRuleRequest(action, resource); err != nil {
+			tm.edgeHandler.BasicAPIHandler.Delete(id)
+		}
 		tm.graph.Unlock()
 	}
 }

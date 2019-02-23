@@ -3,22 +3,17 @@
 /*
  * Copyright (C) 2018 IBM, Inc.
  *
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy ofthe License at
  *
- *  http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specificlanguage governing permissions and
+ * limitations under the License.
  *
  */
 
@@ -54,7 +49,7 @@ func setupFromConfigFile(mngr, file string) []Cmd {
 func tearDownFromConfigFile(mngr, file string) []Cmd {
 	return []Cmd{
 		{"kubectl delete --grace-period=0 --force -f " + k8sConfigFile(mngr, file), false},
-		{"sleep 5", true},
+		{"sleep 10", true},
 	}
 }
 
@@ -191,6 +186,10 @@ func TestK8sClusterNode(t *testing.T) {
 	testNodeCreation(t, nil, nil, k8s.Manager, "cluster", k8s.ClusterName)
 }
 
+func TestK8sConfigMapNode(t *testing.T) {
+	testNodeCreationFromConfig(t, k8s.Manager, "configmap", objName+"-configmap")
+}
+
 func TestK8sContainerNode(t *testing.T) {
 	testNodeCreationFromConfig(t, k8s.Manager, "container", objName+"-container", "Image", "Pod")
 }
@@ -249,6 +248,10 @@ func TestK8sReplicaSetNode(t *testing.T) {
 
 func TestK8sReplicationControllerNode(t *testing.T) {
 	testNodeCreationFromConfig(t, k8s.Manager, "replicationcontroller", objName+"-replicationcontroller")
+}
+
+func TestK8sSecretNode(t *testing.T) {
+	testNodeCreationFromConfig(t, k8s.Manager, "secret", objName+"-secret", "Type")
 }
 
 func TestK8sServiceNode(t *testing.T) {
@@ -554,6 +557,64 @@ func TestK8sServicePodScenario(t *testing.T) {
 				if err = checkEdge(t, c, service, pod, "service"); err != nil {
 					return err
 				}
+
+				return nil
+			},
+		},
+	)
+}
+
+func TestStorageScenario(t *testing.T) {
+	storage := "./k8s/storage.sh"
+	testRunner(
+		t,
+		[]Cmd{
+			{storage + " start", true},
+		},
+		[]Cmd{
+			{storage + " stop", false},
+		},
+		[]CheckFunction{
+			func(c *CheckContext) error {
+				// check nodes exist
+				sc, err := checkNodeCreation(t, c, k8s.Manager, "storageclass", "standard")
+				if err != nil {
+					return err
+				}
+
+				pv, err := checkNodeCreation(t, c, k8s.Manager, "persistentvolume", "task-pv-volume")
+				if err != nil {
+					return err
+				}
+
+				pvc, err := checkNodeCreation(t, c, k8s.Manager, "persistentvolumeclaim", "task-pv-claim")
+				if err != nil {
+					return err
+				}
+
+				pod, err := checkNodeCreation(t, c, k8s.Manager, "pod", "task-pv-pod")
+				if err != nil {
+					return err
+				}
+
+				// check edges exist
+				if err = checkEdge(t, c, sc, pv, "storageclass"); err != nil {
+					return err
+				}
+
+				// FIXME: works when stepping with debugger
+				// if err = checkEdge(t, c, sc, pvc, "storageclass"); err != nil {
+				// 	return err
+				// }
+
+				if err = checkEdge(t, c, pod, pvc, "pod"); err != nil {
+					return err
+				}
+
+				// FIXME: works when stepping with debugger
+				// if err = checkEdge(t, c, pvc, pv, "persistentvolumeclaim"); err != nil {
+				// 	return err
+				// }
 
 				return nil
 			},

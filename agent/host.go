@@ -1,22 +1,17 @@
 /*
  * Copyright (C) 2018 Red Hat, Inc.
  *
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy ofthe License at
  *
- *  http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specificlanguage governing permissions and
+ * limitations under the License.
  *
  */
 
@@ -24,16 +19,21 @@ package agent
 
 import (
 	"errors"
+	"fmt"
 	"io/ioutil"
 	"os"
 	"strings"
 
+	"github.com/fsnotify/fsnotify"
+	"github.com/mitchellh/mapstructure"
 	"github.com/shirou/gopsutil/cpu"
 	"github.com/shirou/gopsutil/host"
+	"github.com/spf13/viper"
 
 	"github.com/skydive-project/skydive/common"
 	"github.com/skydive-project/skydive/config"
 	"github.com/skydive-project/skydive/graffiti/graph"
+	"github.com/skydive-project/skydive/logging"
 )
 
 // CPUInfo defines host information
@@ -134,5 +134,74 @@ func createRootNode(g *graph.Graph) (*graph.Node, error) {
 		m.SetField("VirtualizationRole", hostInfo.VirtualizationRole)
 	}
 
-	return g.NewNode(graph.GenID(), m)
+	if cmdline, err := ioutil.ReadFile("/proc/cmdline"); err == nil {
+		kernelArgs := make(map[string]interface{})
+		for _, arg := range strings.Split(string(cmdline), " ") {
+			if splitted := strings.SplitN(arg, "=", 2); len(splitted) == 1 {
+				kernelArgs[strings.TrimSpace(splitted[0])] = true
+			} else {
+				kernelArgs[strings.TrimSpace(splitted[0])] = strings.TrimSpace(splitted[1])
+			}
+		}
+		m.SetField("KernelCmdLine", kernelArgs)
+	}
+
+	hostNode, err := g.NewNode(graph.GenID(), m)
+	if err != nil {
+		return nil, err
+	}
+
+	parseMetadataConfigFiles(g, hostNode)
+
+	return hostNode, nil
+}
+
+type metadataConfigFile struct {
+	Path     string
+	Type     string
+	Name     string
+	Selector string
+}
+
+func parseMetadataConfigFiles(g *graph.Graph, hostNode *graph.Node) error {
+	files := config.Get("agent.metadata_config.files")
+	if files == nil {
+		return nil
+	}
+
+	var mcfs []metadataConfigFile
+	if err := mapstructure.Decode(files, &mcfs); err != nil {
+		return fmt.Errorf("Unable to read agent.metadata_config.files: %s", err)
+	}
+
+	updatedHostNode := func(v *viper.Viper, mcf metadataConfigFile) {
+		s := v.GetString(mcf.Selector)
+
+		g.Lock()
+		g.AddMetadata(hostNode, fmt.Sprintf("Config.%s", mcf.Name), s)
+		g.Unlock()
+	}
+
+	for _, mcf := range mcfs {
+		v := viper.New()
+		v.SetConfigFile(mcf.Path)
+
+		typ := mcf.Type
+		if typ == "ini" {
+			typ = "toml"
+		}
+
+		v.SetConfigType(typ)
+		v.OnConfigChange(func(in fsnotify.Event) {
+			updatedHostNode(v, mcf)
+		})
+		v.WatchConfig()
+		if err := v.ReadInConfig(); err != nil {
+			logging.GetLogger().Errorf("Unable to read %s: %s", mcf.Path, err)
+			continue
+		}
+		updatedHostNode(v, mcf)
+	}
+
+	return nil
 }

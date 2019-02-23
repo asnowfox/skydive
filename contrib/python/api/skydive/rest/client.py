@@ -1,22 +1,17 @@
 #
 # Copyright (C) 2017 Red Hat, Inc.
 #
-# Licensed to the Apache Software Foundation (ASF) under one
-# or more contributor license agreements.  See the NOTICE file
-# distributed with this work for additional information
-# regarding copyright ownership.  The ASF licenses this file
-# to you under the Apache License, Version 2.0 (the
-# "License"); you may not use this file except in compliance
-# with the License.  You may obtain a copy of the License at
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy ofthe License at
 #
-#  http://www.apache.org/licenses/LICENSE-2.0
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
-# Unless required by applicable law or agreed to in writing,
-# software distributed under the License is distributed on an
-# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-# KIND, either express or implied.  See the License for the
-# specific language governing permissions and limitations
-# under the License.
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specificlanguage governing permissions and
+# limitations under the License.
 #
 
 import json
@@ -31,6 +26,7 @@ from skydive.graph import Node, Edge
 from skydive.rules import NodeRule, EdgeRule
 from skydive.alerts import Alert
 from skydive.captures import Capture
+from skydive.packet_injector import PacketInjection
 
 
 class BadRequest(Exception):
@@ -38,6 +34,8 @@ class BadRequest(Exception):
 
 
 class RESTClient:
+    INJECTION_PATH = "/api/injectpacket"
+
     def __init__(self, endpoint, scheme="http",
                  username="", password="", cookies={},
                  insecure=False, debug=0):
@@ -65,7 +63,7 @@ class RESTClient:
             if self.insecure:
                 context = ssl._create_unverified_context()
             else:
-                context = ssl._create_default_context()
+                context = ssl.create_default_context()
             handlers.append(request.HTTPSHandler(debuglevel=self.debug,
                                                  context=context))
 
@@ -121,7 +119,9 @@ class RESTClient:
 
     def capture_create(self, query, name="", description="",
                        extra_tcp_metric=False, ip_defrag=False,
-                       reassemble_tcp=False, layer_key_mode="L2"):
+                       reassemble_tcp=False, layer_key_mode="L2",
+                       bpf_filter="", capture_type="", port=0,
+                       raw_pkt_limit=0, header_size=0):
         data = {
             "GremlinQuery": query,
             "LayerKeyMode": layer_key_mode,
@@ -137,6 +137,16 @@ class RESTClient:
             data["IPDefrag"] = True
         if reassemble_tcp:
             data["ReassembleTCP"] = True
+        if bpf_filter:
+            data["BPFFilter"] = bpf_filter
+        if capture_type:
+            data["Type"] = capture_type
+        if raw_pkt_limit:
+            data["RawPacketLimit"] = raw_pkt_limit
+        if header_size:
+            data["HeaderSize"] = header_size
+        if port:
+            data["Port"] = port
 
         c = self.request("/api/capture", method="POST", data=json.dumps(data))
         return Capture.from_object(c)
@@ -181,7 +191,7 @@ class RESTClient:
 
     def noderule_list(self):
         objs = self.request("/api/noderule")
-        return [NodeRule.from_object(o) for o in objs]
+        return [NodeRule.from_object(o) for o in objs.values()]
 
     def noderule_delete(self, rule_id):
         path = "/api/noderule/%s" % rule_id
@@ -200,8 +210,42 @@ class RESTClient:
 
     def edgerule_list(self):
         objs = self.request("/api/edgerule")
-        return [EdgeRule.from_object(o) for o in objs]
+        return [EdgeRule.from_object(o) for o in objs.values()]
 
     def edgerule_delete(self, rule_id):
         path = "/api/edgerule/%s" % rule_id
         self.request(path, method="DELETE")
+
+    def injection_create(self, src_query="", dst_query="", type="icmp4",
+                         payload="", interval=1000, src_ip="",
+                         dst_ip="", src_mac="", dst_mac="",
+                         count=1, icmp_id=0, src_port=0, dst_port=0,
+                         increment=False):
+
+        data = json.dumps({
+            "Src": src_query,
+            "Dst": dst_query,
+            "SrcPort": src_port,
+            "DstPort": dst_port,
+            "SrcIP": src_ip,
+            "DstIP": dst_ip,
+            "SrcMAC": src_mac,
+            "DstMAC": dst_mac,
+            "Type": type,
+            "Count": count,
+            "ICMPID": icmp_id,
+            "Interval": interval,
+            "Payload": payload,
+            "Increment": increment
+        })
+
+        r = self.request(self.INJECTION_PATH, method="POST", data=data)
+        return PacketInjection.from_object(r)
+
+    def injection_delete(self, injection_id):
+        path = self.INJECTION_PATH+"/"+injection_id
+        return self.request(path, method="DELETE")
+
+    def injection_list(self):
+        objs = self.request(self.INJECTION_PATH)
+        return [PacketInjection.from_object(o) for o in objs.values()]

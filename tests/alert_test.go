@@ -1,22 +1,17 @@
 /*
  * Copyright (C) 2016 Red Hat, Inc.
  *
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy ofthe License at
  *
- *  http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specificlanguage governing permissions and
+ * limitations under the License.
  *
  */
 
@@ -72,22 +67,6 @@ func wsClose(ws *websocket.Conn) error {
 		return err
 	}
 	return ws.Close()
-}
-
-func decodeStructMessageJSON(b []byte) *ws.StructMessage {
-	mJSON := ws.StructMessageJSON{}
-	if err := json.Unmarshal(b, &mJSON); err != nil {
-		return nil
-	}
-	msg := &ws.StructMessage{
-		Protocol:  ws.JSONProtocol,
-		Namespace: mJSON.Namespace,
-		Type:      mJSON.Type,
-		UUID:      mJSON.UUID,
-		Status:    mJSON.Status,
-		JSONObj:   mJSON.Obj,
-	}
-	return msg
 }
 
 func newClient(endpoint string) (*websocket.Conn, error) {
@@ -328,9 +307,9 @@ func TestAlertScript(t *testing.T) {
 
 func TestAlertWithTimer(t *testing.T) {
 	var (
-		err error
-		ws  *websocket.Conn
-		al  *types.Alert
+		err  error
+		conn *websocket.Conn
+		al   *types.Alert
 	)
 
 	test := &Test{
@@ -341,7 +320,7 @@ func TestAlertWithTimer(t *testing.T) {
 		},
 
 		setupFunction: func(c *TestContext) error {
-			ws, err = connect(config.GetStringSlice("analyzers")[0], 5, nil)
+			conn, err = connect(config.GetStringSlice("analyzers")[0], 5, nil)
 			if err != nil {
 				return err
 			}
@@ -362,32 +341,33 @@ func TestAlertWithTimer(t *testing.T) {
 		},
 
 		tearDownFunction: func(c *TestContext) error {
-			wsClose(ws)
+			wsClose(conn)
 			return c.client.Delete("alert", al.ID())
 		},
 
 		checks: []CheckFunction{func(c *CheckContext) error {
 			for {
-				_, m, err := ws.ReadMessage()
+				_, m, err := conn.ReadMessage()
 				if err != nil {
 					return err
 				}
 
-				msg := decodeStructMessageJSON(m)
-				if msg == nil {
+				var msg ws.StructMessage
+				if err := json.Unmarshal(m, &msg); err != nil {
 					t.Fatal("Failed to unmarshal message")
 				}
+
 				if msg.Namespace != "Alert" {
 					continue
 				}
 
-				testPassed, err := checkMessage(t, []byte(*msg.JSONObj), al, "alert-ns-timer")
+				testPassed, err := checkMessage(t, msg.Obj, al, "alert-ns-timer")
 				if err != nil {
 					return err
 				}
 
 				if !testPassed {
-					return fmt.Errorf("Wrong alert message: %+v (error: %+v)", string(*msg.JSONObj), err)
+					return fmt.Errorf("Wrong alert message: %+v (error: %+v)", string(msg.Obj), err)
 				}
 
 				break
@@ -402,9 +382,9 @@ func TestAlertWithTimer(t *testing.T) {
 
 func TestMultipleTriggering(t *testing.T) {
 	var (
-		err error
-		ws  *websocket.Conn
-		al  *types.Alert
+		err  error
+		conn *websocket.Conn
+		al   *types.Alert
 	)
 
 	test := &Test{
@@ -413,7 +393,7 @@ func TestMultipleTriggering(t *testing.T) {
 		},
 
 		setupFunction: func(c *TestContext) error {
-			ws, err = connect(config.GetStringSlice("analyzers")[0], 5, nil)
+			conn, err = connect(config.GetStringSlice("analyzers")[0], 5, nil)
 			if err != nil {
 				return err
 			}
@@ -434,7 +414,7 @@ func TestMultipleTriggering(t *testing.T) {
 		},
 
 		tearDownFunction: func(c *TestContext) error {
-			wsClose(ws)
+			wsClose(conn)
 			return c.client.Delete("alert", al.ID())
 		},
 
@@ -449,13 +429,13 @@ func TestMultipleTriggering(t *testing.T) {
 				{"ip netns exec alert-lo-down ip l set lo down", true},
 			}
 			for alertNumber < 2 {
-				_, m, err := ws.ReadMessage()
+				_, m, err := conn.ReadMessage()
 				if err != nil {
 					return err
 				}
 
-				msg := decodeStructMessageJSON(m)
-				if msg == nil {
+				var msg ws.StructMessage
+				if err := json.Unmarshal(m, &msg); err != nil {
 					t.Fatal("Failed to unmarshal message")
 				}
 
@@ -464,7 +444,7 @@ func TestMultipleTriggering(t *testing.T) {
 				}
 
 				var alertMsg alert.Message
-				if err := msg.UnmarshalObj(&alertMsg); err != nil {
+				if err := json.Unmarshal(msg.Obj, &alertMsg); err != nil {
 					t.Fatalf("Failed to unmarshal alert : %s", err.Error())
 				}
 

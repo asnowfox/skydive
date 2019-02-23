@@ -1,22 +1,17 @@
 /*
  * Copyright (C) 2018 Red Hat, Inc.
  *
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy ofthe License at
  *
- *  http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specificlanguage governing permissions and
+ * limitations under the License.
  *
  */
 
@@ -32,6 +27,7 @@ import (
 	"math/rand"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/robertkrimen/otto"
@@ -60,6 +56,7 @@ type jsTimer struct {
 // Runtime is a Skydive JavaScript runtime environment
 type Runtime struct {
 	*otto.Otto
+	sync.Mutex
 	evalQueue     chan *evalReq
 	stopEventLoop chan bool
 	closed        chan struct{}
@@ -391,10 +388,60 @@ func (r *Runtime) Do(fn func(*otto.Otto)) {
 	<-done
 }
 
-// Exec executes some JavaScript code
+// Exec queues the execution of some JavaScript code
 func (r *Runtime) Exec(code string) (v otto.Value, err error) {
 	r.Do(func(vm *otto.Otto) { v, err = vm.Run(code) })
 	return v, err
+}
+
+// ExecFunction queues a CallFunction method
+func (r *Runtime) ExecFunction(source string, params ...interface{}) (v otto.Value, err error) {
+	r.Do(func(vm *otto.Otto) { v, err = r.CallFunction(source, params...) })
+	return v, err
+}
+
+// ExecPromise executes a promise and return its result
+func (r *Runtime) ExecPromise(source string, params ...interface{}) (v otto.Value, err error) {
+	var done chan otto.Value
+	r.Do(func(vm *otto.Otto) { done, err = r.CallPromise(source, params...) })
+	v = <-done
+	return v, err
+}
+
+// CallFunction takes the source of a function and evaluate it with the specifed parameters
+func (r *Runtime) CallFunction(source string, params ...interface{}) (otto.Value, error) {
+	result, err := r.Run("(" + source + ")")
+	if err != nil {
+		return otto.UndefinedValue(), fmt.Errorf("Error while compile source %s: %s", source, result.String())
+	}
+
+	return result.Call(result, params...)
+}
+
+// CallPromise takes the source of a promise and evaluate it with the specifed parameters
+func (r *Runtime) CallPromise(source string, params ...interface{}) (chan otto.Value, error) {
+	result, err := r.CallFunction(source, params...)
+	if err != nil {
+		return nil, fmt.Errorf("Error while executing function: %s", err)
+	}
+
+	if !result.IsObject() {
+		return nil, fmt.Errorf("Workflow is expected to return a promise, returned %s", result.Class())
+	}
+
+	done := make(chan otto.Value)
+	promise := result.Object()
+	finally, err := r.ToValue(func(call otto.FunctionCall) otto.Value {
+		result = call.Argument(0)
+		done <- result
+		return result
+	})
+
+	result, _ = promise.Call("then", finally)
+	promise = result.Object()
+	promise.Call("catch", finally)
+
+	return done, nil
 }
 
 // Start the runtime evaluation loop
@@ -404,6 +451,7 @@ func (r *Runtime) Start() {
 
 // Stop the runtime evaluation loop
 func (r *Runtime) Stop() {
+	r.stopEventLoop <- true
 }
 
 // NewRuntime returns a new JavaScript runtime environment

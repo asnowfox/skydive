@@ -1,22 +1,17 @@
 /*
  * Copyright 2018 Red Hat
  *
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy ofthe License at
  *
- *  http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specificlanguage governing permissions and
+ * limitations under the License.
  *
  */
 
@@ -27,15 +22,11 @@ import (
 
 	"github.com/skydive-project/skydive/config"
 	"github.com/skydive-project/skydive/graffiti/graph"
-	"github.com/skydive-project/skydive/probe"
 
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 )
-
-// LinkHandler handles links between two k8s or istio objects
-type LinkHandler func(g *graph.Graph) probe.Probe
 
 // NewConfig returns a new Kubernetes configuration object
 func NewConfig(kubeConfig string) (*rest.Config, error) {
@@ -71,6 +62,7 @@ func NewK8sProbe(g *graph.Graph) (*Probe, error) {
 
 	subprobeHandlers := map[string]SubprobeHandler{
 		"cluster":               newClusterProbe,
+		"configmap":             newConfigMapProbe,
 		"container":             newContainerProbe,
 		"cronjob":               newCronJobProbe,
 		"daemonset":             newDaemonSetProbe,
@@ -86,6 +78,7 @@ func NewK8sProbe(g *graph.Graph) (*Probe, error) {
 		"pod":                   newPodProbe,
 		"replicaset":            newReplicaSetProbe,
 		"replicationcontroller": newReplicationControllerProbe,
+		"secret":                newSecretProbe,
 		"service":               newServiceProbe,
 		"statefulset":           newStatefulSetProbe,
 		"storageclass":          newStorageClassProbe,
@@ -95,20 +88,23 @@ func NewK8sProbe(g *graph.Graph) (*Probe, error) {
 
 	linkerHandlers := []LinkHandler{
 		newContainerDockerLinker,
+		newDeploymentPodLinker,
+		newDeploymentReplicaSetLinker,
 		newPodContainerLinker,
 		newHostNodeLinker,
 		newNodePodLinker,
 		newIngressServiceLinker,
 		newNetworkPolicyLinker,
+		newServiceEndpointsLinker,
 		newServicePodLinker,
+		newStatefulSetPodLinker,
+		newPodPVCLinker,
+		newPVPVCLinker,
+		newStorageClassPVCLinker,
+		newStorageClassPVLinker,
 	}
 
-	var linkers []probe.Probe
-	for _, linkHandler := range linkerHandlers {
-		if linker := linkHandler(g); linker != nil {
-			linkers = append(linkers, linker)
-		}
-	}
+	linkers := InitLinkers(linkerHandlers, g)
 
 	probe := NewProbe(g, Manager, subprobes[Manager], linkers)
 
@@ -116,11 +112,11 @@ func NewK8sProbe(g *graph.Graph) (*Probe, error) {
 		"namespace",
 		"node",
 		"persistentvolume",
-		"persistentvolumeclaim",
 		"storageclass",
 	)
 
 	probe.AppendNamespaceLinkers(
+		"configmap",
 		"cronjob",
 		"deployment",
 		"daemonset",
@@ -129,8 +125,10 @@ func NewK8sProbe(g *graph.Graph) (*Probe, error) {
 		"job",
 		"networkpolicy",
 		"pod",
+		"persistentvolumeclaim",
 		"replicaset",
 		"replicationcontroller",
+		"secret",
 		"service",
 		"statefulset",
 	)

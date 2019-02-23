@@ -1,22 +1,17 @@
 /*
  * Copyright (C) 2017 Red Hat, Inc.
  *
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy ofthe License at
  *
- *  http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specificlanguage governing permissions and
+ * limitations under the License.
  *
  */
 
@@ -160,10 +155,24 @@ func matchSelector(obj metav1.Object, selector labels.Selector) bool {
 	return selector.Matches(labels.Set(obj.GetLabels()))
 }
 
-func filterObjectsBySelector(objects []interface{}, labelSelector *metav1.LabelSelector) (out []metav1.Object) {
+func matchLabelSelector(obj metav1.Object, labelSelector *metav1.LabelSelector) bool {
+	selector, err := metav1.LabelSelectorAsSelector(labelSelector)
+	return err == nil && selector.Matches(labels.Set(obj.GetLabels()))
+}
+
+func matchMapSelector(obj metav1.Object, mapSelector map[string]string) bool {
+	labelSelector := &metav1.LabelSelector{MatchLabels: mapSelector}
+	selector, err := metav1.LabelSelectorAsSelector(labelSelector)
+	return err == nil && selector.Matches(labels.Set(obj.GetLabels()))
+}
+
+func filterObjectsBySelector(objects []interface{}, labelSelector *metav1.LabelSelector, namespace ...string) (out []metav1.Object) {
 	selector, _ := metav1.LabelSelectorAsSelector(labelSelector)
 	for _, obj := range objects {
 		obj := obj.(metav1.Object)
+		if len(namespace) > 0 && obj.GetNamespace() != namespace[0] {
+			continue
+		}
 		if matchSelector(obj, selector) {
 			out = append(out, obj)
 		}

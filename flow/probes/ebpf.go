@@ -3,22 +3,17 @@
 /*
  * Copyright (C) 2017 Red Hat, Inc.
  *
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy ofthe License at
  *
- *  http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specificlanguage governing permissions and
+ * limitations under the License.
  *
  */
 
@@ -59,12 +54,14 @@ const (
 	ebpfUpdate = 2 * time.Second
 )
 
+// EBPFFlow describes the userland side of an eBPF flow
 type EBPFFlow struct {
 	start time.Time
 	last  time.Time
 	lastK int64
 }
 
+// EBPFProbe the eBPF probe
 type EBPFProbe struct {
 	probeNodeTID string
 	fd           int
@@ -75,6 +72,7 @@ type EBPFProbe struct {
 	quit         chan bool
 }
 
+// EBPFProbesHandler creates new eBPF probes
 type EBPFProbesHandler struct {
 	graph      *graph.Graph
 	probes     map[graph.Identifier]*EBPFProbe
@@ -83,7 +81,13 @@ type EBPFProbesHandler struct {
 	wg         sync.WaitGroup
 }
 
-func (p *EBPFProbe) flowFromEBPF(ebpfFlow *EBPFFlow, kernFlow *C.struct_flow, updatedAt int64) *flow.Flow {
+func kernFlowKey(kernFlow *C.struct_flow) string {
+	hasher := sha1.New()
+	hasher.Write(C.GoBytes(unsafe.Pointer(&kernFlow.key), C.sizeof___u64))
+	return hex.EncodeToString(hasher.Sum(nil))
+}
+
+func (p *EBPFProbe) newFlowOperation(ebpfFlow *EBPFFlow, kernFlow *C.struct_flow) *flow.Operation {
 	f := flow.NewFlow()
 	f.Init(common.UnixMillis(ebpfFlow.start), p.probeNodeTID, flow.UUIDs{})
 	f.Last = common.UnixMillis(ebpfFlow.last)
@@ -154,7 +158,6 @@ func (p *EBPFProbe) flowFromEBPF(ebpfFlow *EBPFFlow, kernFlow *C.struct_flow, up
 				A:        portA,
 				B:        portB,
 			}
-
 			p := gopacket.NewPacket(C.GoBytes(unsafe.Pointer(&kernFlow.payload[0]), C.PAYLOAD_LENGTH), layers.LayerTypeTCP, gopacket.DecodeOptions{})
 			if p.Layer(gopacket.LayerTypeDecodeFailure) == nil {
 				path, app := flow.LayersPath(p.Layers())
@@ -185,8 +188,6 @@ func (p *EBPFProbe) flowFromEBPF(ebpfFlow *EBPFFlow, kernFlow *C.struct_flow, up
 		}
 	}
 
-	f.RTT = int64(kernFlow.rtt)
-
 	appLayers := strings.Split(f.LayersPath, "/")
 	f.Application = appLayers[len(appLayers)-1]
 
@@ -199,35 +200,56 @@ func (p *EBPFProbe) flowFromEBPF(ebpfFlow *EBPFFlow, kernFlow *C.struct_flow, up
 		Last:      f.Last,
 	}
 
-	hasher := sha1.New()
-	hasher.Write(C.GoBytes(unsafe.Pointer(&kernFlow.key), C.sizeof___u64))
-	key := hex.EncodeToString(hasher.Sum(nil))
+	key := kernFlowKey(kernFlow)
 
 	f.UpdateUUID(key, flow.Opts{})
 
-	return f
+	return &flow.Operation{
+		Type: flow.ReplaceOperation,
+		Flow: f,
+		Key:  key,
+	}
+}
+
+func (p *EBPFProbe) updateFlowOperation(ebpfFlow *EBPFFlow, kernFlow *C.struct_flow) *flow.Operation {
+	f := flow.NewFlow()
+	f.Last = common.UnixMillis(ebpfFlow.last)
+
+	f.Metric = &flow.FlowMetric{
+		ABBytes:   int64(kernFlow.metrics.ab_bytes),
+		ABPackets: int64(kernFlow.metrics.ab_packets),
+		BABytes:   int64(kernFlow.metrics.ba_bytes),
+		BAPackets: int64(kernFlow.metrics.ba_packets),
+		Start:     f.Start,
+		Last:      f.Last,
+	}
+
+	key := kernFlowKey(kernFlow)
+
+	return &flow.Operation{
+		Type: flow.UpdateOperation,
+		Flow: f,
+		Key:  key,
+	}
 }
 
 func (p *EBPFProbe) run() {
 	var info syscall.Sysinfo_t
 	syscall.Sysinfo(&info)
 
-	_, flowChan := p.flowTable.Start()
+	_, flowChanOperation := p.flowTable.Start()
 	defer p.flowTable.Stop()
 
 	var startKTimeNs int64
 	var start time.Time
 
 	ebpfFlows := make(map[C.__u64]*EBPFFlow)
-
 	updateTicker := time.NewTicker(ebpfUpdate)
 	defer updateTicker.Stop()
 
 	for {
 		select {
 		case now := <-updateTicker.C:
-			unow := common.UnixMillis(now)
-
 			// try to get start monotonic time
 			if startKTimeNs == 0 {
 				cmap := p.module.Map("u64_config_values")
@@ -255,8 +277,11 @@ func (p *EBPFProbe) run() {
 					break
 				}
 				key = nextKey
+				// delete every entry after we read the entry value
+				p.module.DeleteElement(p.fmap, unsafe.Pointer(&key))
 
 				lastK := int64(kernFlow.last)
+				last := start.Add(time.Duration(lastK - startKTimeNs))
 
 				ebpfFlow, ok := ebpfFlows[kernFlow.key]
 				if !ok {
@@ -270,22 +295,22 @@ func (p *EBPFProbe) run() {
 
 					ebpfFlow = &EBPFFlow{
 						start: now,
-						last:  start.Add(time.Duration(lastK - startKTimeNs)),
+						last:  last,
 					}
 					ebpfFlows[kernFlow.key] = ebpfFlow
-				}
 
-				if lastK != ebpfFlow.lastK {
 					ebpfFlow.lastK = lastK
-					ebpfFlow.last = start.Add(time.Duration(lastK - startKTimeNs))
+					ebpfFlow.last = last
 
-					fl := p.flowFromEBPF(ebpfFlow, &kernFlow, unow)
-					flowChan <- fl
+					flowChanOperation <- p.newFlowOperation(ebpfFlow, &kernFlow)
+				} else {
+					flowChanOperation <- p.updateFlowOperation(ebpfFlow, &kernFlow)
 				}
+			}
 
-				if now.Sub(ebpfFlow.last).Seconds() > p.expire.Seconds() {
-					p.module.DeleteElement(p.fmap, unsafe.Pointer(&kernFlow.key))
-					delete(ebpfFlows, kernFlow.key)
+			for k, v := range ebpfFlows {
+				if time.Now().Sub(v.last).Seconds() > p.expire.Seconds() {
+					delete(ebpfFlows, k)
 				}
 			}
 		case <-p.quit:

@@ -1,22 +1,17 @@
 /*
  * Copyright (C) 2018 Red Hat, Inc.
  *
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy ofthe License at
  *
- *  http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specificlanguage governing permissions and
+ * limitations under the License.
  *
  */
 
@@ -98,6 +93,10 @@ func (l *listener) OnNodeAdded(node *Node) {
 }
 
 func (l *listener) OnNodeUpdated(node *Node) {
+	l.nodeEvent(node)
+}
+
+func (l *listener) OnNodeDeleted(node *Node) {
 	l.nodeEvent(node)
 }
 
@@ -230,16 +229,44 @@ func NewResourceLinker(g *Graph, glhs1 []ListenerHandler, glhs2 []ListenerHandle
 }
 
 // getFieldsAsArray returns an array of corresponding values from a field list
-func getFieldsAsArray(obj common.Getter, fields []string) ([]interface{}, error) {
-	values := make([]interface{}, len(fields))
+func getFieldsAsArray(obj common.Getter, fields []string) ([][]interface{}, error) {
+	values := make([][]interface{}, len(fields))
 	for i, index := range fields {
 		v, err := obj.GetField(index)
 		if err != nil {
 			return nil, err
 		}
-		values[i] = v
+
+		if v2, ok := v.([]interface{}); ok {
+			values[i] = v2
+		} else {
+			values[i] = []interface{}{v}
+		}
 	}
-	return values, nil
+
+	if len(values) == 1 {
+		v := make([][]interface{}, len(values[0]))
+		for i, value := range values[0] {
+			v[i] = []interface{}{value}
+		}
+		return v, nil
+	}
+
+	return cartN(values...), nil
+}
+
+func cartN(a ...[]interface{}) (c [][]interface{}) {
+	if len(a) == 0 {
+		return [][]interface{}{nil}
+	}
+
+	r := cartN(a[1:]...)
+	for _, e := range a[0] {
+		for _, p := range r {
+			c = append(c, append([]interface{}{e}, p...))
+		}
+	}
+	return
 }
 
 // MetadataIndexerLinker describes an object that links resources from one indexer
@@ -265,10 +292,12 @@ func (mil *MetadataIndexerLinker) createEdge(node1, node2 *Node) *Edge {
 
 // GetABLinks returns all the outgoing links for a node
 func (mil *MetadataIndexerLinker) GetABLinks(node *Node) (edges []*Edge) {
-	if fields, err := getFieldsAsArray(node, mil.indexer1.indexes); err == nil {
-		nodes, _ := mil.indexer2.Get(fields...)
-		for _, n := range nodes {
-			edges = append(edges, mil.createEdge(node, n))
+	if vFields, err := getFieldsAsArray(node, mil.indexer1.indexes); err == nil {
+		for _, fields := range vFields {
+			nodes, _ := mil.indexer2.Get(fields...)
+			for _, n := range nodes {
+				edges = append(edges, mil.createEdge(node, n))
+			}
 		}
 	}
 	return
@@ -276,10 +305,12 @@ func (mil *MetadataIndexerLinker) GetABLinks(node *Node) (edges []*Edge) {
 
 // GetBALinks returns all the incoming links for a node
 func (mil *MetadataIndexerLinker) GetBALinks(node *Node) (edges []*Edge) {
-	if fields, err := getFieldsAsArray(node, mil.indexer2.indexes); err == nil {
-		nodes, _ := mil.indexer1.Get(fields...)
-		for _, n := range nodes {
-			edges = append(edges, mil.createEdge(n, node))
+	if vFields, err := getFieldsAsArray(node, mil.indexer2.indexes); err == nil {
+		for _, fields := range vFields {
+			nodes, _ := mil.indexer1.Get(fields...)
+			for _, n := range nodes {
+				edges = append(edges, mil.createEdge(n, node))
+			}
 		}
 	}
 	return

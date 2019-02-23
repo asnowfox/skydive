@@ -1,29 +1,23 @@
 /*
  * Copyright (C) 2018 Red Hat, Inc.
  *
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy ofthe License at
  *
- *  http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specificlanguage governing permissions and
+ * limitations under the License.
  *
  */
 
 package cmd
 
 import (
-	"crypto/tls"
 	"fmt"
 	"net/url"
 	"os"
@@ -49,12 +43,12 @@ var (
 	serviceType = common.ServiceType("Pod")
 )
 
-func newHubClientPool(host string, addresses []common.ServiceAddress, authOptions *shttp.AuthenticationOpts, writeCompression bool, queueSize int, tlsConfig *tls.Config) *websocket.StructClientPool {
+func newHubClientPool(host string, addresses []common.ServiceAddress, opts websocket.ClientOpts) *websocket.StructClientPool {
 	pool := websocket.NewStructClientPool("HubClientPool")
 
 	for _, sa := range addresses {
 		url, _ := url.Parse(fmt.Sprintf("ws://%s:%d/ws/pod", sa.Addr, sa.Port))
-		client := websocket.NewClient(host, serviceType, url, authOptions, nil, queueSize, writeCompression, tlsConfig)
+		client := websocket.NewClient(host, serviceType, url, opts)
 		pool.AddClient(client)
 	}
 
@@ -127,7 +121,13 @@ var PodCmd = &cobra.Command{
 			logging.GetLogger().Info("Pod is running in standalone mode")
 		}
 
-		clientPool := newHubClientPool(hostname, addresses, clusterAuthOptions, writeCompression, queueSize, nil)
+		opts := websocket.ClientOpts{
+			AuthOpts:         clusterAuthOptions,
+			WriteCompression: writeCompression,
+			QueueSize:        queueSize,
+		}
+
+		clientPool := newHubClientPool(hostname, addresses, opts)
 
 		pod, err := pod.NewPod(apiServer, clientPool, g, authBackend, nil, tr, writeCompression, queueSize, time.Second*time.Duration(pingDelay), time.Second*time.Duration(pongTimeout))
 		if err != nil {

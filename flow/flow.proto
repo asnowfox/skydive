@@ -1,22 +1,17 @@
 /*
  * Copyright (C) 2015 Red Hat, Inc.
  *
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy ofthe License at
  *
- *  http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specificlanguage governing permissions and
+ * limitations under the License.
  *
  */
 
@@ -27,6 +22,9 @@ package flow;
 import "github.com/gogo/protobuf/gogoproto/gogo.proto";
 import "flow/layers/generated.proto";
 
+import "filters/filters.proto";
+
+option go_package = "github.com/skydive-project/skydive/flow";
 option (gogoproto.protosizer_all) = true;
 option (gogoproto.sizer_all) = false;
 
@@ -53,6 +51,13 @@ message TransportLayer {
   int64 A = 2;
   int64 B = 3;
   int64 ID = 4;
+}
+
+enum FlowFinishType {
+  NOT_FINISHED = 0;
+  TIMEOUT = 1;
+  TCP_FIN = 2;
+  TCP_RST = 3;
 }
 
 enum ICMPType {
@@ -183,6 +188,13 @@ message Flow {
   repeated RawPacket LastRawPackets = 36;
 /* number of raw packet captured */
   int64 RawPacketsCaptured = 37;
+
+/* describes the way the flow was ended (e.g. by RST, FIN) */
+  FlowFinishType FinishType = 60;
+}
+
+message FlowArray {
+  repeated Flow Flows = 1;
 }
 
 message FlowSet {
@@ -193,4 +205,14 @@ message FlowSet {
 
 message FlowSearchReply {
   FlowSet FlowSet = 1;
+}
+
+message TableQuery {
+  string Type = 1;
+  filters.SearchQuery query = 2;
+}
+
+message TableReply {
+  int32 Status = 1;
+  repeated bytes FlowSetBytes = 2;
 }

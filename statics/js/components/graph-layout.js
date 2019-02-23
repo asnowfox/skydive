@@ -251,13 +251,18 @@ var TopologyGraphLayout = function(vm, selector) {
   this.height = $(selector).height();
 
   this.simulation = d3.forceSimulation(Object.values(this.nodes))
-    .force("charge", d3.forceManyBody().strength(-500))
+    .force("charge", d3.forceManyBody().strength(-600))
     .force("link", d3.forceLink(Object.values(this.links)).distance(this.linkDistance).strength(0.9).iterations(2))
-    .force("collide", d3.forceCollide().radius(80).strength(0.1).iterations(1))
+    .force("collide", d3.forceCollide().radius(90).strength(0.2).iterations(1))
     .force("center", d3.forceCenter(this.width / 2, this.height / 2))
     .force("x", d3.forceX(0).strength(0.01))
     .force("y", d3.forceY(0).strength(0.01))
-    .alphaDecay(0.0090);
+    .alphaDecay(0.0050);
+
+  var stop = function() {
+    this.simulation.stop();
+  }
+  this.simulationStop = debounce(stop.bind(self), 2000);
 
   this.zoom = d3.zoom()
     .on("zoom", this.zoomed.bind(this));
@@ -268,29 +273,7 @@ var TopologyGraphLayout = function(vm, selector) {
     .call(this.zoom)
     .on("dblclick.zoom", null);
 
-  var defsMarker = function(type, target, point) {
-    let id = "arrowhead-"+type+"-"+target+"-"+point;
-
-    let refX = 1.65
-    let refY = 0.15
-    let pathD = "M0,0 L0,0.3 L0.5,0.15 Z"
-    if (type === "egress" || point === "end") {
-      pathD = "M0.5,0 L0.5,0.3 L0,0.15 Z"
-    }
-
-    if (target === "deny") {
-      refX = 1.85
-      refY = 0.3
-      a = "M0.1,0 L0.6,0.5 L0.5,0.6 L0,0.1 Z"
-      b = "M0,0.5 L0.1,0.6 L0.6,0.1 L0.5,0 Z"
-      pathD = a + " " + b
-    }
-
-    let color = "rgb(0, 128, 0, 0.8)"
-    if (target === "deny") {
-      color = "rgba(255, 0, 0, 0.8)"
-    }
-
+  var defsMarker = function(id, refX, refY, color, pathD) {
     self.svg.append("defs").append("marker")
       .attr("id", id)
       .attr("refX", refX)
@@ -304,14 +287,44 @@ var TopologyGraphLayout = function(vm, selector) {
         .attr("d", pathD);
   }
 
-  defsMarker("ingress", "deny", "begin");
-  defsMarker("ingress", "deny", "end");
-  defsMarker("ingress", "allow", "begin");
-  defsMarker("ingress", "allow", "end");
-  defsMarker("egress", "deny", "begin");
-  defsMarker("egress", "deny", "end");
-  defsMarker("egress", "allow", "begin");
-  defsMarker("egress", "allow", "end");
+  const marker_arrow = "M0.6,0.15 L0.6,0.45 L1.1,0.30 Z ";
+  const marker_rarrow = "M1.1,0.15 L1.1,0.45 L0.6,0.30 Z ";
+  const marker_cross = "M0.05,0 L0.55,0.5 L0.5,0.55 L0,0.05 Z  M0,0.5 L0.05,0.55 L0.55,0.05 L0.5,0 Z";
+
+  const marker_refX = 2.0;
+  const marker_refY = 0.3;
+
+  const marker_black = "rgb(0, 0, 0, 0.8)";
+  const marker_green = "rgb(0, 128, 0, 0.8)";
+  const marker_red = "rgb(255, 0, 0, 0.8)";
+
+  var networkpolicyMarker = function(type, target, point) {
+    let id = "arrowhead-"+type+"-"+target+"-"+point;
+
+    let color = (target === "deny") ? marker_red : marker_green;
+
+    let pathD = (type === "egress" || point === "end") ? marker_rarrow : marker_arrow;
+    if (target === "deny") {
+      pathD += marker_cross;
+    }
+
+    defsMarker(id, marker_refX, marker_refY, color, pathD);
+  }
+
+  var kubeDefaultMarker = function(label) {
+    let id = "arrowhead-"+label;
+    defsMarker(id, marker_refX, marker_refY, marker_black, marker_arrow);
+  }
+
+  networkpolicyMarker("ingress", "deny", "begin");
+  networkpolicyMarker("ingress", "deny", "end");
+  networkpolicyMarker("ingress", "allow", "begin");
+  networkpolicyMarker("ingress", "allow", "end");
+  networkpolicyMarker("egress", "deny", "begin");
+  networkpolicyMarker("egress", "deny", "end");
+  networkpolicyMarker("egress", "allow", "begin");
+  networkpolicyMarker("egress", "allow", "end");
+  kubeDefaultMarker("default")
 
   this.g = this.svg.append("g");
 
@@ -378,6 +391,25 @@ TopologyGraphLayout.prototype = {
     this.svg.transition().duration(500).call(this.zoom.scaleBy, 0.9);
   },
 
+  pinAll: function() {
+    for (var i in this.nodes) {
+      var node = this.nodes[i];
+
+      this.pinNode(node);
+    }
+  },
+
+  unPinAll: function() {
+    for (var i in this.nodes) {
+      var node = this.nodes[i];
+
+      this.unpinNode(node);
+    }
+
+    this.simulation.alpha(1).restart();
+    this.simulationStop();
+  },
+
   zoomFit: function() {
     var bounds = this.g.node().getBBox();
     var parent = this.g.node().parentElement;
@@ -442,7 +474,7 @@ TopologyGraphLayout.prototype = {
 
     // application
     if ((e.source.metadata.Type === "netns") && (e.target.metadata.Type === "netns"))
-      return 1800;
+      distance = 200;
 
     if (e.source.group !== e.target.group) {
       if (e.source.isGroupOwner()) {
@@ -804,7 +836,7 @@ TopologyGraphLayout.prototype = {
       }
     }
 
-    if (node.metadata.Capture && node.metadata.Capture.State === "active" && 
+    if (node.metadata.Capture && node.metadata.Capture.State === "active" &&
         (!node._metadata.Capture || node._metadata.Capture.State !== "active")) {
       this.captureStarted(node);
     } else if (!node.metadata.Capture && node._metadata.Capture) {
@@ -948,8 +980,10 @@ TopologyGraphLayout.prototype = {
   },
 
   onNodeDragEnd: function(d) {
-    if (!d3.event.active) this.simulation.alphaTarget(0);
-
+    if (!d3.event.active) { 
+      this.simulation.alphaTarget(0);
+      this.simulationStop();
+    }
     if (d.isGroupOwner()) {
       var i, members = d.group.memberArray.concat(d.group._memberArray);
       for (i = members.length - 1; i >= 0; i--) {
@@ -1510,19 +1544,15 @@ TopologyGraphLayout.prototype = {
       .classed("link-label-alert",  function(d) { return d.alert; })
       .text(function(d) { return d.text; });
 
-    this.linkLabel.each(function(d) {
+    enter.each(function(d) {
       self.g.select("#link-" + d.link.id)
         .classed("link-label-active", d.active)
         .classed("link-label-warning", d.warning)
         .classed("link-label-alert", d.alert)
         .style("stroke-dasharray", self.styleStrokeDasharray(d))
         .style("stroke-dashoffset", self.styleStrokeDashoffset(d))
-        .style("animation", self.styleAnimation(d))
         .style("stroke", self.styleStroke(d));
     });
-
-    // force a tick
-    this.tick();
   },
 
   delLinkLabel: function(link) {
@@ -1538,21 +1568,18 @@ TopologyGraphLayout.prototype = {
   },
 
   arrowhead: function(link) {
-    let none = "url(#arrowhead-none)";
-
-    if (link.source.metadata.Type !== "networkpolicy") {
-      return none
+    if ("Manager" in link.metadata) {
+      switch(link.metadata.RelationType) {
+      case "networkpolicy":
+        if (link.source.metadata.Type === "networkpolicy" || link.target.metadata.Type === "pod") {
+            return "url(#arrowhead-"+link.metadata.PolicyType+"-"+link.metadata.PolicyTarget+"-"+link.metadata.PolicyPoint+")";
+        }
+        break;
+      default:
+        return "url(#arrowhead-default)";
+      }
     }
-
-    if (link.target.metadata.Type !== "pod") {
-      return none
-    }
-
-    if (link.metadata.RelationType !== "networkpolicy") {
-      return none
-    }
-
-    return "url(#arrowhead-"+link.metadata.PolicyType+"-"+link.metadata.PolicyTarget+"-"+link.metadata.PolicyPoint+")";
+    return "url(#arrowhead-none)";
   },
 
   update: function() {
@@ -1651,6 +1678,9 @@ TopologyGraphLayout.prototype = {
       .attr("class", this.linkWrapClass)
       .attr("marker-end", function(d) { return self.arrowhead(d.link); });
 
+    linkWrapEnter.filter(function(d) { return d._emphasized; })
+      .each(this.emphasizeEdge.bind(this));
+
     this.linkWrap = linkWrapEnter.merge(this.linkWrap);
 
     this.group = this.group.data(this.groups, function(d) { return d.id; });
@@ -1666,10 +1696,12 @@ TopologyGraphLayout.prototype = {
     this.simulation.nodes(nodes);
     this.simulation.force("link").links(links);
     this.simulation.alpha(1).restart();
+
+    this.simulationStop();
   },
 
   highlightLink: function(d) {
-    if(d.collapse) return;
+    if(d.collapse || d._emphasized) return;
     var t = d3.transition()
       .duration(300)
       .ease(d3.easeLinear);
@@ -1678,7 +1710,7 @@ TopologyGraphLayout.prototype = {
   },
 
   unhighlightLink: function(d) {
-    if(d.collapse) return;
+    if(d.collapse || d._emphasized) return;
     var t = d3.transition()
       .duration(300)
       .ease(d3.easeLinear);
@@ -1719,6 +1751,8 @@ TopologyGraphLayout.prototype = {
   emphasizeNodeID: function(id) {
     var self = this;
 
+    if (!(id in this.nodes) && !(id in this._nodes)) return;
+
     if (id in this.nodes) this.nodes[id]._emphasized = true;
     if (id in this._nodes) this._nodes[id]._emphasized = true;
 
@@ -1736,15 +1770,50 @@ TopologyGraphLayout.prototype = {
       .attr("r", function(d) { return self.nodeSize(d) + 8; });
   },
 
-  deemphasizeNodeID: function(id) {
+  emphasizeEdgeID: function(id) {
+    var self = this;
+
+    if (!(id in this.links) && !(id in this._links)) return;
+
+    if (id in this.links) this.links[id]._emphasized = true;
+    if (id in this._links) this._links[id]._emphasized = true;
+
+    var t = d3.transition()
+      .duration(300)
+      .ease(d3.easeLinear);
+
+    this.g.select("#link-wrap-" + id).transition(t).style("stroke", "rgba(25, 251, 104, 0.50)");
+    this.g.select("#link-" + id).transition(t).style("stroke-width", 2);
+  },
+
+  emphasizeID: function(id) {
+    this.emphasizeNodeID(id);
+    this.emphasizeEdgeID(id);
+  },
+
+  deemphasizeID: function(id) {
     if (id in this.nodes) this.nodes[id]._emphasized = false;
     if (id in this._nodes) this._nodes[id]._emphasized = false;
 
+    if (id in this.links) this.links[id]._emphasized = false;
+    if (id in this._links) this._links[id]._emphasized = false;
+
     this.g.select("#node-emphasize-" + id).remove();
+
+    var t = d3.transition()
+      .duration(300)
+      .ease(d3.easeLinear);
+
+    this.g.select("#link-wrap-" + id).transition(t).style("stroke", null);
+    this.g.select("#link-" + id).transition(t).style("stroke-width", null);
   },
 
   emphasizeNode: function(d) {
     this.emphasizeNodeID(d.id);
+  },
+
+  emphasizeEdge: function(d) {
+    this.emphasizeEdgeID(d.id);
   },
 
   nodeClass: function(d) {
@@ -1759,7 +1828,7 @@ TopologyGraphLayout.prototype = {
   },
 
   linkClass: function(d) {
-    var clazz = "link " + d.metadata.RelationType;
+    var clazz = "link " + (d.metadata.Manager || d.metadata.RelationType);
 
     if (d.metadata.Type) clazz += " " + d.metadata.Type;
 

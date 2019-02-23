@@ -29,7 +29,7 @@ endef
 
 define PROTOC_GEN
 $(call VENDOR_RUN,${PROTOC_GEN_GOFAST_GITHUB})
-$(call VENDOR_RUN,${PROTOC_GEN_GO_GITHUB}) protoc -Ivendor -I. --plugin=${BUILD_TOOLS}/protoc-gen-gogofaster --gogofaster_out . $1
+$(call VENDOR_RUN,${PROTOC_GEN_GO_GITHUB}) protoc -Ivendor -I. --plugin=${BUILD_TOOLS}/protoc-gen-gogofaster --gogofaster_out $$GOPATH/src $1
 endef
 
 VERSION?=$(shell $(VERSION_CMD))
@@ -52,6 +52,7 @@ EASYJSON_FILES_TAG=\
 	flow/storage/elasticsearch/elasticsearch.go \
 	flow/storage/orientdb/orientdb.go \
 	graffiti/graph/elasticsearch.go \
+	sflow/sflowmetric.go \
 	topology/metrics.go \
 	topology/probes/netlink/route.go \
 	topology/probes/netlink/neighbor.go
@@ -161,6 +162,7 @@ endif
 
 ifeq ($(WITH_OPENCONTRAIL), true)
   BUILD_TAGS+=opencontrail
+  EXTRA_ARGS+=-opencontrail
 ifeq ($(OS_RHEL),Y)
   STATIC_LIBS+=libxml2.a
 endif
@@ -211,8 +213,8 @@ debug.analyzer:
 %.pb.go: %.proto
 	$(call PROTOC_GEN,$<)
 
-flow/flow.pb.go: flow/flow.proto
-	$(call PROTOC_GEN,$<)
+flow/flow.pb.go: flow/flow.proto filters/filters.proto
+	$(call PROTOC_GEN,flow/flow.proto)
 
 	# always export flow.ParentUUID as we need to store this information to know
 	# if it's a Outer or Inner packet.
@@ -232,15 +234,23 @@ flow/flow.pb.go: flow/flow.proto
 flow/layers/generated.proto: flow/layers/layers.go
 	$(call VENDOR_RUN,${PROTEUS_GITHUB}) proteus proto -f $${GOPATH}/src -p github.com/skydive-project/skydive/flow/layers
 	sed -e 's/^package .*;/package layers;/' -i $@
+	sed -e 's/^option go_package = "layers"/option go_package = "github.com\/skydive-project\/skydive\/flow\/layers"/' -i $@
 	sed -e 's/^message Layer/message /' -i $@
 	sed -e 's/option (gogoproto.typedecl) = false;//' -i $@
 	sed 's/\((gogoproto\.customname) = "\([^\"]*\)"\)/\1, (gogoproto.jsontag) = "\2,omitempty"/' -i $@
+
+websocket/structmessage.pb.go: websocket/structmessage.proto
+	$(call PROTOC_GEN,$<)
+
+	sed -e 's/type StructMessage struct {/type StructMessage struct { XXX_state structMessageState `json:"-"`/' -i websocket/structmessage.pb.go
+	gofmt -s -w $@
 
 .proto: govendor flow/layers/generated.pb.go flow/flow.pb.go filters/filters.pb.go websocket/structmessage.pb.go
 
 .PHONY: .proto.clean
 .proto.clean:
 	find . \( -name *.pb.go ! -path './vendor/*' \) -exec rm {} \;
+	rm flow/layers/generated.proto
 
 GEN_EASYJSON_FILES_ALL := $(patsubst %.go,%_easyjson.go,$(EASYJSON_FILES_ALL))
 GEN_EASYJSON_FILES_TAG := $(patsubst %.go,%_easyjson.go,$(EASYJSON_FILES_TAG))
@@ -304,17 +314,15 @@ statics/bindata.go: .typescript ebpf.build $(shell find statics -type f \( ! -in
 .PHONY: compile
 compile:
 	CGO_CFLAGS_ALLOW='.*' CGO_LDFLAGS_ALLOW='.*' $(BUILD_CMD) install \
-		-ldflags="-X $(SKYDIVE_GITHUB_VERSION) \
-		-B $(BUILD_ID)" \
+		-ldflags="${LDFLAGS} -B $(BUILD_ID) -X $(SKYDIVE_GITHUB_VERSION)" \
 		${GOFLAGS} -tags="${BUILD_TAGS}" ${VERBOSE_FLAGS} \
 		${SKYDIVE_GITHUB}
 
 .PHONY: compile.static
 compile.static:
 	$(BUILD_CMD) install \
-		-ldflags "-X $(SKYDIVE_GITHUB_VERSION) \
-		-extldflags \"-static $(STATIC_LIBS_ABS)\" \
-		-B $(BUILD_ID)" \
+		-ldflags="${LDFLAGS} -B $(BUILD_ID) -X $(SKYDIVE_GITHUB_VERSION) '-extldflags=-static $(STATIC_LIBS_ABS)'" \
+		${GOFLAGS} \
 		${VERBOSE_FLAGS} -tags "netgo ${BUILD_TAGS}" \
 		-installsuffix netgo || true
 
@@ -349,10 +357,12 @@ static: skydive.clean govendor genlocalfiles
 .PHONY: contribs.clean
 contribs.clean:
 	$(MAKE) -C contrib/snort clean
+	$(MAKE) -C contrib/objectstore clean
 
 .PHONY: contribs
 contribs:
 	$(MAKE) -C contrib/snort
+	$(MAKE) -C contrib/objectstore
 
 .PHONY: dpdk.build
 dpdk.build:
@@ -387,7 +397,7 @@ test.functionals.static: govendor genlocalfiles
 	$(GOVENDOR) test -tags "netgo ${BUILD_TAGS} test" \
 		-ldflags "-X $(SKYDIVE_GITHUB_VERSION) -extldflags \"-static $(STATIC_LIBS_ABS)\"" \
 		-installsuffix netgo \
-		${GOFLAGS} ${VERBOSE_FLAGS} -timeout ${TIMEOUT} \
+		-ldflags="${LDFLAGS}" ${GOFLAGS} ${VERBOSE_FLAGS} -timeout ${TIMEOUT} \
 		-c -o tests/functionals ./tests/
 
 .PHONY: test.functionals.run
@@ -430,10 +440,10 @@ ifeq ($(COVERAGE), true)
 else
 ifneq ($(TEST_PATTERN),)
 	set -v ; \
-	$(GOVENDOR) test -tags "${BUILD_TAGS} test" ${GOFLAGS} ${VERBOSE_FLAGS} -timeout ${TIMEOUT} -test.run ${TEST_PATTERN} ${UT_PACKAGES}
+	$(GOVENDOR) test -tags "${BUILD_TAGS} test" -ldflags="${LDFLAGS}" ${GOFLAGS} ${VERBOSE_FLAGS} -timeout ${TIMEOUT} -test.run ${TEST_PATTERN} ${UT_PACKAGES}
 else
 	set -v ; \
-	$(GOVENDOR) test -tags "${BUILD_TAGS} test" ${GOFLAGS} ${VERBOSE_FLAGS} -timeout ${TIMEOUT} ${UT_PACKAGES}
+	$(GOVENDOR) test -tags "${BUILD_TAGS} test" -ldflags="${LDFLAGS}" ${GOFLAGS} ${VERBOSE_FLAGS} -timeout ${TIMEOUT} ${UT_PACKAGES}
 endif
 endif
 
@@ -513,50 +523,6 @@ rpm:
 docker-image: static
 	cp $$GOPATH/bin/skydive contrib/docker/skydive.$$(uname -m)
 	docker build -t ${DOCKER_IMAGE}:${DOCKER_TAG} --build-arg ARCH=$$(uname -m) -f contrib/docker/Dockerfile contrib/docker/
-
-.PHONY: docker-build
-docker-build:
-	docker build -t skydive-compile \
-		--build-arg UID=$$(id -u) \
-		-f contrib/docker/Dockerfile.compile  contrib/docker
-	docker volume create govendor-cache
-	docker volume create gobuild-cache
-	docker rm skydive-compile-build || true
-	docker run --name skydive-compile-build \
-		--env UID=$$(id -u) \
-		--volume $$PWD:/root/go/src/github.com/skydive-project/skydive \
-		--volume govendor-cache:/root/go/.cache/govendor \
-		--volume gobuild-cache:/root/.cache/go-build \
-		skydive-compile
-	docker cp skydive-compile-build:/root/go/bin/skydive contrib/docker/skydive.$$(uname -m)
-	docker rm skydive-compile-build
-	docker build -t ${DOCKER_IMAGE}:${DOCKER_TAG} \
-		--label "Version=${VERSION}" \
-		--build-arg ARCH=$$(uname -m) \
-		-f contrib/docker/Dockerfile contrib/docker/
-
-.PHONY: docker-cross-build
-docker-cross-build: ebpf.build
-	docker build -t skydive-crosscompile-${TARGET_GOARCH} \
-		$${TARGET_ARCH:+--build-arg TARGET_ARCH=$${TARGET_ARCH}} \
-		$${TARGET_GOARCH:+--build-arg TARGET_GOARCH=$${TARGET_GOARCH}} \
-		$${DEBARCH:+--build-arg DEBARCH=$${DEBARCH}} \
-		--build-arg UID=$$(id -u) \
-		-f contrib/docker/Dockerfile.crosscompile contrib/docker
-	docker volume create govendor-cache
-	docker rm skydive-crosscompile-build-${TARGET_GOARCH} || true
-	docker run --name skydive-crosscompile-build-${TARGET_GOARCH} \
-		--env UID=$$(id -u) \
-		--volume $$PWD:/root/go/src/github.com/skydive-project/skydive \
-		--volume govendor-cache:/root/go/.cache/govendor \
-		skydive-crosscompile-${TARGET_GOARCH}
-	docker cp skydive-crosscompile-build-${TARGET_GOARCH}:/root/go/bin/linux_${TARGET_GOARCH}/skydive contrib/docker/skydive.${TARGET_GOARCH}
-	docker rm skydive-crosscompile-build-${TARGET_GOARCH}
-	docker build -t ${DOCKER_IMAGE}:${DOCKER_TAG} \
-		--label "Version=${VERSION}" \
-		--build-arg ARCH=${TARGET_GOARCH} \
-		$${BASE:+--build-arg BASE=$${BASE}} \
-		-f contrib/docker/Dockerfile.static contrib/docker/
 
 SKYDIVE_PROTO_FILES:= \
 	flow/flow.proto \

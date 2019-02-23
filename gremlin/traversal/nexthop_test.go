@@ -1,22 +1,17 @@
 /*
  * Copyright (C) 2018 Red Hat, Inc.
  *
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy ofthe License at
  *
- *  http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specificlanguage governing permissions and
+ * limitations under the License.
  *
  */
 
@@ -102,7 +97,7 @@ func TestNextHopStep2(t *testing.T) {
 	var routes []*netlink.Route
 	_, cidr, _ := net.ParseCIDR("192.168.0.0/24")
 	route := &netlink.Route{
-		Prefix:   netlink.Prefix{*cidr},
+		Prefix:   netlink.Prefix{IPNet: *cidr},
 		NextHops: nhs,
 	}
 	routes = append(routes, route)
@@ -156,7 +151,7 @@ func TestNextHopStep3(t *testing.T) {
 
 	var routes []*netlink.Route
 	route := &netlink.Route{
-		Prefix:   netlink.Prefix{netlink.IPv4DefaultRoute},
+		Prefix:   netlink.Prefix{IPNet: netlink.IPv4DefaultRoute},
 		NextHops: nhs,
 	}
 	routes = append(routes, route)
@@ -225,7 +220,7 @@ func TestNextHopStep4(t *testing.T) {
 	_, cidr, _ := net.ParseCIDR("10.16.0.0/24")
 	routes = append(routes, &netlink.Route{
 		NextHops: nhs2,
-		Prefix:   netlink.Prefix{*cidr},
+		Prefix:   netlink.Prefix{IPNet: *cidr},
 	})
 
 	var routingtables netlink.RoutingTables
@@ -269,7 +264,7 @@ func TestNextHopStep5(t *testing.T) {
 	_, cidr, _ := net.ParseCIDR("10.60.0.0/24")
 	routes = append(routes, &netlink.Route{
 		NextHops: nhs,
-		Prefix:   netlink.Prefix{*cidr},
+		Prefix:   netlink.Prefix{IPNet: *cidr},
 	})
 
 	var routingtables netlink.RoutingTables
