@@ -82,6 +82,8 @@ func (fm *FlowMetric) GetFieldInt64(field string) (int64, error) {
 		return fm.BAPackets, nil
 	case "BABytes":
 		return fm.BABytes, nil
+	case "RTT":
+		return fm.RTT, nil
 	}
 	return 0, common.ErrFieldNotFound
 }
@@ -146,15 +148,9 @@ func (fm *FlowMetric) applyRatio(ratio float64) *FlowMetric {
 
 // Split a metric into two parts
 func (fm *FlowMetric) Split(cut int64) (common.Metric, common.Metric) {
-	if cut < fm.Start {
+	if cut <= fm.Start {
 		return nil, fm
-	} else if cut > fm.Last {
-		return fm, nil
-	} else if fm.Start == fm.Last {
-		return fm, nil
-	} else if cut == fm.Start {
-		return nil, fm
-	} else if cut == fm.Last {
+	} else if cut >= fm.Last || fm.Start == fm.Last {
 		return fm, nil
 	}
 

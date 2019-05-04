@@ -61,6 +61,14 @@ EOF
   systemctl restart elasticsearch
   systemctl restart orientdb
   systemctl restart lxd
+  systemctl restart vpp
+
+  for vm in dev_dev vagrant_analyzer1 vagrant_agent1 devstack_devstack
+  do
+    virsh destroy $vm
+    virsh undefine $vm
+    virsh vol-delete $vm.img default
+  done
 
   virsh net-destroy vagrant0
   virsh net-destroy vagrant-libvirt
@@ -71,6 +79,7 @@ EOF
 
   # time to restart services
   sleep 8
+  ip l del virbr0
 }
 
 function snapshot_items() {

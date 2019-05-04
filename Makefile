@@ -52,15 +52,17 @@ EASYJSON_FILES_TAG=\
 	flow/storage/elasticsearch/elasticsearch.go \
 	flow/storage/orientdb/orientdb.go \
 	graffiti/graph/elasticsearch.go \
-	sflow/sflowmetric.go \
+	sflow/sflow.go \
 	topology/metrics.go \
 	topology/probes/netlink/route.go \
-	topology/probes/netlink/neighbor.go
+	topology/probes/netlink/neighbor.go \
+	topology/probes/ovsdb/ovsdb.go
 EASYJSON_FILES_TAG_LINUX=\
 	topology/probes/netlink/netlink.go \
 	topology/probes/socketinfo/connection.go
 EASYJSON_FILES_TAG_OPENCONTRAIL=\
 	topology/probes/opencontrail/routing_table.go
+VPPBINAPI_GITHUB:=git.fd.io/govpp.git/cmd/binapi-generator
 VERBOSE_FLAGS?=-v
 VERBOSE_TESTS_FLAGS?=-test.v
 VERBOSE?=true
@@ -70,7 +72,7 @@ ifeq ($(VERBOSE), false)
 endif
 ifeq ($(COVERAGE), true)
   TEST_COVERPROFILE?=../functionals.cover
-  EXTRA_ARGS+= -test.coverprofile=${TEST_COVERPROFILE}
+  EXTRA_ARGS+=-test.coverprofile=${TEST_COVERPROFILE}
 endif
 TIMEOUT?=1m
 TEST_PATTERN?=
@@ -88,7 +90,9 @@ BOOTSTRAP_ARGS?=
 BUILD_TAGS?=$(TAGS)
 WITH_LXD?=true
 WITH_OPENCONTRAIL?=true
-WITH_LIBVIRT?=true
+WITH_LIBVIRT_GO?=true
+WITH_EBPF_DOCKER_BUILDER?=false
+WITH_VPP?=false
 
 export PATH:=$(BUILD_TOOLS):$(PATH)
 
@@ -148,12 +152,16 @@ endif
 
 ifeq ($(WITH_K8S), true)
   BUILD_TAGS+=k8s
-  EXTRA_ARGS+=-analyzer.topology.probes=k8s
+  ANALYZER_TEST_PROBES+=k8s
 endif
 
 ifeq ($(WITH_ISTIO), true)
   BUILD_TAGS+=k8s istio
-  EXTRA_ARGS+=-analyzer.topology.probes=k8s,istio
+  ANALYZER_TEST_PROBES+=istio
+endif
+
+ifeq ($(WITH_OVN), true)
+  ANALYZER_TEST_PROBES+=ovn
 endif
 
 ifeq ($(WITH_HELM), true)
@@ -162,7 +170,7 @@ endif
 
 ifeq ($(WITH_OPENCONTRAIL), true)
   BUILD_TAGS+=opencontrail
-  EXTRA_ARGS+=-opencontrail
+  AGENT_TEST_EXTRA_PROBES+=opencontrail
 ifeq ($(OS_RHEL),Y)
   STATIC_LIBS+=libxml2.a
 endif
@@ -177,11 +185,21 @@ ifeq ($(WITH_LXD), true)
   BUILD_TAGS+=lxd
 endif
 
-ifeq ($(WITH_LIBVIRT), true)
+ifeq ($(WITH_LIBVIRT_GO), true)
   BUILD_TAGS+=libvirt
 endif
 
+ifeq ($(WITH_VPP), true)
+  BUILD_TAGS+=vpp
+  AGENT_TEST_EXTRA_PROBES+=vpp
+endif
+
+comma:= ,
+empty:=
+space:= $(empty) $(empty)
+EXTRA_ARGS+=-analyzer.topology.probes=$(subst $(space),$(comma),$(ANALYZER_TEST_PROBES)) -agent.topology.probes=$(subst $(space),$(comma),$(AGENT_TEST_EXTRA_PROBES))
 STATIC_LIBS_ABS := $(addprefix $(STATIC_DIR)/,$(STATIC_LIBS))
+STATIC_BUILD_TAGS := $(filter-out libvirt,$(BUILD_TAGS))
 
 .PHONY: all install
 all install: skydive
@@ -223,6 +241,8 @@ flow/flow.pb.go: flow/flow.proto filters/filters.proto
 		-e 's/ICMPType\(.*\),omitempty\(.*\)/ICMPType\1\2/' \
 		-e 's/int64\(.*\),omitempty\(.*\)/int64\1\2/' \
 		-i $@
+	# add omitempty to RTT as it is not always filled
+	sed -e 's/json:"RTT"/json:"RTT,omitempty"/' -i $@
 	# do not export LastRawPackets used internally
 	sed -e 's/json:"LastRawPackets,omitempty"/json:"-"/g' -i $@
 	# add flowState to flow generated struct
@@ -272,12 +292,23 @@ topology/probes/socketinfo/connection_easyjson.go: topology/probes/socketinfo/co
 topology/probes/opencontrail/routing_table_easyjson.go: $(EASYJSON_FILES_TAG_OPENCONTRAIL)
 	$(call VENDOR_RUN,${EASYJSON_GITHUB}) easyjson -build_tags opencontrail $<
 
+topology/probes/ovsdb/ovsdb.pb_easyjson.go: topology/probes/ovsdb/ovsdb.go
+	$(call VENDOR_RUN,${EASYJSON_GITHUB}) easyjson $<
+
 .PHONY: .easyjson
 .easyjson: flow/flow.pb_easyjson.go $(GEN_EASYJSON_FILES_TAG) $(GEN_EASYJSON_FILES_TAG_LINUX) $(GEN_EASYJSON_FILES_TAG_OPENCONTRAIL)
 
 .PHONY: .easyjson.clean
 .easyjson.clean:
 	find . \( -name *_easyjson.go ! -path './vendor/*' \) -exec rm {} \;
+
+.PHONY: .binapigenerator
+binapigenerator: vendor/${VPPBINAPI_GITHUB}
+	$(call VENDOR_RUN,${VPPBINAPI_GITHUB})
+
+.PHONY: .vppbinapi.clean
+.vppbinapi.clean:
+	rm -rf topology/probes/vpp/bin_api
 
 BINDATA_DIRS := \
 	js/*.js \
@@ -311,6 +342,11 @@ statics/bindata.go: .typescript ebpf.build $(shell find statics -type f \( ! -in
 	$(call VENDOR_RUN,${GO_BINDATA_GITHUB}) go-bindata ${GO_BINDATA_FLAGS} -nometadata -o statics/bindata.go -pkg=statics -ignore=bindata.go $(BINDATA_DIRS)
 	gofmt -w -s statics/bindata.go
 
+.PHONY: .vppbinapi
+.vppbinapi: binapigenerator
+	$(GOVENDOR) generate -tags "${BUILD_TAGS}" \
+		github.com/skydive-project/skydive/topology/probes/vpp
+
 .PHONY: compile
 compile:
 	CGO_CFLAGS_ALLOW='.*' CGO_LDFLAGS_ALLOW='.*' $(BUILD_CMD) install \
@@ -323,11 +359,11 @@ compile.static:
 	$(BUILD_CMD) install \
 		-ldflags="${LDFLAGS} -B $(BUILD_ID) -X $(SKYDIVE_GITHUB_VERSION) '-extldflags=-static $(STATIC_LIBS_ABS)'" \
 		${GOFLAGS} \
-		${VERBOSE_FLAGS} -tags "netgo ${BUILD_TAGS}" \
+		${VERBOSE_FLAGS} -tags "netgo ${STATIC_BUILD_TAGS}" \
 		-installsuffix netgo || true
 
 .PHONY: skydive
-skydive: govendor genlocalfiles dpdk.build contribs compile
+skydive: govendor genlocalfiles dpdk.build compile
 
 .PHONY: skydive.clean
 skydive.clean:
@@ -352,7 +388,7 @@ bench.flow: bench.flow.traces
 
 .PHONY: static
 static: skydive.clean govendor genlocalfiles
-	$(MAKE) compile.static WITH_LIBVIRT=false
+	$(MAKE) compile.static WITH_LIBVIRT_GO=false
 
 .PHONY: contribs.clean
 contribs.clean:
@@ -360,7 +396,7 @@ contribs.clean:
 	$(MAKE) -C contrib/objectstore clean
 
 .PHONY: contribs
-contribs:
+contribs: govendor genlocalfiles
 	$(MAKE) -C contrib/snort
 	$(MAKE) -C contrib/objectstore
 
@@ -377,7 +413,11 @@ dpdk.clean:
 .PHONY: ebpf.build
 ebpf.build:
 ifeq ($(WITH_EBPF), true)
-	$(MAKE) -C probe/ebpf
+ifeq ($(WITH_EBPF_DOCKER_BUILDER), true)
+	$(MAKE) -C probe/ebpf clean docker-ebpf-build
+else
+	$(MAKE) -C probe/ebpf clean ebpf-build
+endif
 endif
 
 .PHONY: ebpf.clean
@@ -394,10 +434,10 @@ test.functionals.compile: govendor genlocalfiles
 
 .PHONY: test.functionals.static
 test.functionals.static: govendor genlocalfiles
-	$(GOVENDOR) test -tags "netgo ${BUILD_TAGS} test" \
-		-ldflags "-X $(SKYDIVE_GITHUB_VERSION) -extldflags \"-static $(STATIC_LIBS_ABS)\"" \
+	$(GOVENDOR) test -tags "netgo ${STATIC_BUILD_TAGS} test" \
+		-ldflags "${LDFLAGS} -X $(SKYDIVE_GITHUB_VERSION) -extldflags \"-static $(STATIC_LIBS_ABS)\"" \
 		-installsuffix netgo \
-		-ldflags="${LDFLAGS}" ${GOFLAGS} ${VERBOSE_FLAGS} -timeout ${TIMEOUT} \
+		${GOFLAGS} ${VERBOSE_FLAGS} -timeout ${TIMEOUT} \
 		-c -o tests/functionals ./tests/
 
 .PHONY: test.functionals.run
@@ -406,20 +446,20 @@ test.functionals.run:
 
 .PHONY: tests.functionals.all
 test.functionals.all: test.functionals.compile
-	$(MAKE) TIMEOUT="8m" ARGS="${ARGS} ${EXTRA_ARGS}" test.functionals.run
+	$(MAKE) TIMEOUT="8m" ARGS="${ARGS}" test.functionals.run EXTRA_ARGS="${EXTRA_ARGS}"
 
 .PHONY: test.functionals.batch
 test.functionals.batch: test.functionals.compile
 ifneq ($(TEST_PATTERN),)
-	set -e ; $(MAKE) ARGS="${ARGS} ${EXTRA_ARGS} -test.run ${TEST_PATTERN}" test.functionals.run
+	set -e ; $(MAKE) ARGS="${ARGS} -test.run ${TEST_PATTERN}" test.functionals.run EXTRA_ARGS="${EXTRA_ARGS}"
 else
-	set -e ; $(MAKE) ARGS="${ARGS} ${EXTRA_ARGS}" test.functionals.run
+	set -e ; $(MAKE) ARGS="${ARGS} " test.functionals.run EXTRA_ARGS="${EXTRA_ARGS}"
 endif
 
 .PHONY: test.functionals
 test.functionals: test.functionals.compile
 	for functest in ${FUNC_TESTS} ; do \
-		$(MAKE) ARGS="-test.run $$functest$$\$$ ${ARGS} ${EXTRA_ARGS}" test.functionals.run; \
+		$(MAKE) ARGS="-test.run $$functest$$\$$ ${ARGS}" test.functionals.run EXTRA_ARGS="${EXTRA_ARGS}"; \
 	done
 
 .PHONY: functional
@@ -453,6 +493,7 @@ govendor:
 	$(GOVENDOR) sync
 	patch -p0 < dpdk/dpdk.govendor.patch
 	rm -rf vendor/github.com/weaveworks/tcptracer-bpf/vendor/github.com/
+	find vendor/github.com/docker/go-connections -name "*.go" | xargs -n 1 perl -i -pe 's|github.com/Sirupsen|github.com/sirupsen|g'
 
 .PHONY: fmt
 fmt: govendor genlocalfiles
@@ -505,10 +546,10 @@ lint: gometalinter
 	gometalinter --disable=gotype ${GOMETALINTER_FLAGS} --vendor -e '.*\.pb.go' -e '.*\._easyjson.go' -e 'statics/bindata.go' --skip=statics/... --deadline 10m --sort=path ./... --json | tee lint.json || true
 
 .PHONY: genlocalfiles
-genlocalfiles: .proto .bindata .easyjson
+genlocalfiles: .proto .bindata .easyjson .vppbinapi
 
 .PHONY: clean
-clean: skydive.clean test.functionals.clean dpdk.clean contribs.clean ebpf.clean .easyjson.clean .proto.clean .typescript.clean
+clean: skydive.clean test.functionals.clean dpdk.clean contribs.clean ebpf.clean .easyjson.clean .proto.clean .typescript.clean .vppbinapi.clean
 	grep path vendor/vendor.json | perl -pe 's|.*": "(.*?)".*|\1|g' | xargs -n 1 go clean -i >/dev/null 2>&1 || true
 
 .PHONY: srpm

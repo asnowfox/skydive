@@ -1,9 +1,6 @@
 %global import_path     github.com/skydive-project/skydive
 %global gopath          %{_datadir}/gocode
 
-%if 0%{?fedora} >= 27
-%define with_features WITH_EBPF=true
-%endif
 %{!?with_features:%global with_features %{nil}}
 
 %if !%{defined gotest}
@@ -37,7 +34,7 @@
 %endif
 %endif
 
-%{!?fullver:%global fullver 0.21.0}
+%{!?fullver:%global fullver 0.22.0}
 %define version %{extractversion %{fullver}}
 %{!?tag:%global tag 1}
 
@@ -146,6 +143,8 @@ install -D -m 644 etc/skydive.yml.default %{buildroot}/%{_sysconfdir}/skydive/sk
 install -D -m 644 skydive-bash-completion.sh %{buildroot}/%{_sysconfdir}/bash_completion.d/skydive-bash-completion.sh
 install -d -m 755 %{buildroot}/%{_datadir}/skydive-ansible
 cp -R contrib/ansible/* %{buildroot}/%{_datadir}/skydive-ansible/
+install -d -m 755 %{buildroot}/%{_datadir}/doc/skydive-ansible
+cp -R contrib/tripleo/* %{buildroot}/%{_datadir}/doc/skydive-ansible/
 
 # SELinux
 install -D -m 644 contrib/packaging/rpm/skydive.pp.bz2 %{buildroot}%{_datadir}/selinux/packages/skydive.pp.bz2
@@ -242,6 +241,7 @@ fi
 %{_unitdir}/skydive-analyzer.service
 
 %files ansible
+%doc %{_docdir}/skydive-ansible/skydive-tripleo-inventory
 %{_datadir}/skydive-ansible
 
 %files selinux
@@ -250,6 +250,9 @@ fi
 %attr(0644,root,root) %{_mandir}/man8/skydive-selinux.8.*
 
 %changelog
+* Thu Mar 21 2019 Sylvain Afchain <safchain@redhat.com> - 0.22.0-1
+- Bump to version 0.22.0
+
 * Fri Nov 30 2018 Sylvain Baubeau <sbaubeau@redhat.com> - 0.21.0-1
 - Add dependency on libvirt
 - Remove skydive-ansible dependency on skydive

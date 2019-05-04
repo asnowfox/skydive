@@ -8,6 +8,7 @@ set -e
 : ${ARCHES:=amd64 ppc64le s390x}
 # arm64 waiting on  golang 1.11 (https://github.com/skydive-project/skydive/pull/1188#discussion_r204336060)
 : ${DOCKER_IMAGE:=skydive/skydive}
+: ${DOCKER_IMAGE_SNAPSHOT:=skydive/snapshots}
 : ${DOCKER_USERNAME:=skydiveproject}
 : ${REF:=latest}
 
@@ -29,9 +30,22 @@ GOBUILD_DIR=/root/.cache/go-build
 TOPLEVEL_VOL=$PWD
 TOPLEVEL_DIR=/root/go/src/github.com/skydive-project/skydive
 
+DOCKER_TAG_SNAPSHOT=$( make version )
+
+docker_tag_with_arch() {
+    local tag=$1
+    local arch=$2
+    echo ${tag}-linux-${arch}
+}
+
 docker_tag() {
     local arch=$1
-    echo ${DOCKER_TAG}-linux-${arch}
+    docker_tag_with_arch $DOCKER_TAG $arch
+}
+
+docker_tag_snapshot() {
+    local arch=$1
+    docker_tag_with_arch $DOCKER_TAG_SNAPSHOT $arch
 }
 
 docker_skydive_builder() {
@@ -53,6 +67,7 @@ docker_skydive_builder() {
     docker rm $image || true
     docker run --name $image \
         --env UID=$uid \
+        --env TOPLEVEL_GOPATH=$GOPATH \
         --volume $TOPLEVEL_VOL:$TOPLEVEL_DIR \
         --volume $GOVENDOR_VOL:$GOVENDOR_DIR \
         --volume $GOBUILD_VOL:$GOBUILD_DIR \
@@ -70,12 +85,16 @@ docker_skydive_target() {
     local dockerfile=$2
 
     # build target skydive docker image
-    local tag=$( docker_tag ${arch} )
-    docker build -t ${DOCKER_IMAGE}:$tag \
+    local image=$( docker_image ${arch} )
+    docker build -t $image \
         --label "Version=${VERSION}" \
         --build-arg ARCH=$arch \
         ${BASE:+--build-arg BASE=${BASE}} \
         -f $DOCKER_DIR/$dockerfile $DOCKER_DIR
+    if [ "$VERSION" == latest ]; then
+        local image_snapshot=$( docker_image_snapshot ${arch} )
+        docker tag $image $image_snapshot
+    fi
 }
 
 docker_native_build() {
@@ -131,6 +150,11 @@ docker_image() {
     echo ${DOCKER_IMAGE}:$( docker_tag ${arch} )
 }
 
+docker_image_snapshot() {
+    local arch=$1
+    echo ${DOCKER_IMAGE_SNAPSHOT}:$( docker_tag_snapshot ${arch} )
+}
+
 docker_inspect() {
     local arch=$1
     docker inspect --format='{{index .RepoDigests 0}}' $( docker_image ${arch} )
@@ -140,10 +164,14 @@ docker_push() {
     for arch in $ARCHES
     do
         docker push $( docker_image ${arch} )
+        if [ "$VERSION" == latest ]; then
+            docker push $( docker_image_snapshot ${arch} )
+        fi
     done
 }
 
-docker_manifest() {
+docker_manifest_create_and_push() {
+    local image=$1
     digests=""
     for arch in $ARCHES
     do
@@ -154,7 +182,7 @@ docker_manifest() {
     res=0
     for i in {1..6}
     do
-        docker manifest create --amend "${DOCKER_IMAGE}:${DOCKER_TAG}" ${digests} && break || res=$?
+        docker manifest create --amend "${image}" ${digests} && break || res=$?
         sleep 10
     done
     [ $res != 0 ] && exit $res
@@ -162,11 +190,18 @@ docker_manifest() {
     for arch in $ARCHES
     do
         digest=$( docker_inspect ${arch} )
-        docker manifest annotate --arch $arch "${DOCKER_IMAGE}:${DOCKER_TAG}" $digest
+        docker manifest annotate --arch $arch "${image}" $digest
     done
 
-    docker manifest inspect "${DOCKER_IMAGE}:${DOCKER_TAG}"
-    docker manifest push --purge "${DOCKER_IMAGE}:${DOCKER_TAG}"
+    docker manifest inspect "${image}"
+    docker manifest push --purge "${image}"
+}
+
+docker_manifest() {
+    docker_manifest_create_and_push ${DOCKER_IMAGE}:${DOCKER_TAG}
+    if [ "$VERSION" == latest ]; then
+        docker_manifest_create_and_push ${DOCKER_IMAGE_SNAPSHOT}:${DOCKER_TAG_SNAPSHOT}
+    fi
 }
 
 [ -n "$SKIP_BUILD" ] && echo "Skipping build." || docker_build

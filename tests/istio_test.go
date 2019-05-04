@@ -29,7 +29,22 @@ import (
 
 /* -- test creation of single resource -- */
 func TestIstioDestinationRuleNode(t *testing.T) {
-	testNodeCreationFromConfig(t, istio.Manager, "destinationrule", objName+"-destinationrule")
+	file := "destinationrule"
+	name := objName + "-" + file
+	testRunner(
+		t,
+		setupFromConfigFile(istio.Manager, file),
+		tearDownFromConfigFile(istio.Manager, file),
+		[]CheckFunction{
+			func(c *CheckContext) error {
+				_, err := checkNodeCreation(t, c, istio.Manager, "destinationrule", name, "TrafficPolicy", false, "HostName", "c")
+				if err != nil {
+					return err
+				}
+				return nil
+			},
+		},
+	)
 }
 
 func TestIstioGatewayNode(t *testing.T) {
@@ -65,11 +80,18 @@ func TestIstioVirtualServicePodScenario(t *testing.T) {
 				if err != nil {
 					return err
 				}
-				pod, err := checkNodeCreation(t, c, k8s.Manager, "pod", name)
+				podv1, err := checkNodeCreation(t, c, k8s.Manager, "pod", "podv1")
 				if err != nil {
 					return err
 				}
-				if err = checkEdge(t, c, virtualservice, pod, "virtualservice"); err != nil {
+				podv2, err := checkNodeCreation(t, c, k8s.Manager, "pod", "podv2")
+				if err != nil {
+					return err
+				}
+				if err = checkEdge(t, c, virtualservice, podv1, "virtualservice", "Protocol", "HTTP", "Weight", 90); err != nil {
+					return err
+				}
+				if err = checkEdge(t, c, virtualservice, podv2, "virtualservice", "Protocol", "HTTP", "Weight", 10); err != nil {
 					return err
 				}
 				return nil
@@ -96,6 +118,58 @@ func TestIstioDestinationRuleServiceScenario(t *testing.T) {
 					return err
 				}
 				if err = checkEdge(t, c, destinationrule, service, "destinationrule"); err != nil {
+					return err
+				}
+				return nil
+			},
+		},
+	)
+}
+
+func TestIstioDestinationRuleServiceEntryScenario(t *testing.T) {
+	file := "destinationrule-serviceentry"
+	name := objName + "-" + file
+	testRunner(
+		t,
+		setupFromConfigFile(istio.Manager, file),
+		tearDownFromConfigFile(istio.Manager, file),
+		[]CheckFunction{
+			func(c *CheckContext) error {
+				destinationrule, err := checkNodeCreation(t, c, istio.Manager, "destinationrule", name)
+				if err != nil {
+					return err
+				}
+				serviceentry, err := checkNodeCreation(t, c, istio.Manager, "serviceentry", name)
+				if err != nil {
+					return err
+				}
+				if err = checkEdge(t, c, destinationrule, serviceentry, "destinationrule"); err != nil {
+					return err
+				}
+				return nil
+			},
+		},
+	)
+}
+
+func TestIstioGatewayVirtualServiceScenario(t *testing.T) {
+	file := "gateway-virtualservice"
+	name := objName + "-" + file
+	testRunner(
+		t,
+		setupFromConfigFile(istio.Manager, file),
+		tearDownFromConfigFile(istio.Manager, file),
+		[]CheckFunction{
+			func(c *CheckContext) error {
+				gateway, err := checkNodeCreation(t, c, istio.Manager, "gateway", name)
+				if err != nil {
+					return err
+				}
+				virtualservice, err := checkNodeCreation(t, c, istio.Manager, "virtualservice", name)
+				if err != nil {
+					return err
+				}
+				if err = checkEdge(t, c, gateway, virtualservice, "gateway"); err != nil {
 					return err
 				}
 				return nil
@@ -176,7 +250,7 @@ func TestBookInfoScenario(t *testing.T) {
 
 				// check edges exist
 
-				if err = checkEdge(t, c, vs, podProductpage, "virtualservice"); err != nil {
+				if err = checkEdge(t, c, vs, podProductpage, "virtualservice", "Protocol", "HTTP"); err != nil {
 					return err
 				}
 

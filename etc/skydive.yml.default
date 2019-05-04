@@ -110,11 +110,9 @@ analyzer:
     probes:
       # - k8s
       # - istio
+      # - ovn
 
     k8s:
-      # EXPERIMENTAL: k8s probe is still under development and should not be used
-      # on production systems
-
       # kubeconfig resolution order:
       # - if config_file param is defined then use it;
       # - else if $KUBECONFIG environment is define then use it;
@@ -162,6 +160,12 @@ analyzer:
       - serviceentry
       - virtualservice
 
+    ovn:
+      # OVN northbound address. Format can be either:
+      # * tcp://addr:port
+      # * unix:///var/run/openvswitch/ovnnb_db.sock
+      # address: unix:///var/run/openvswitch/ovnnb_db.sock
+
   replication:
     # debug: false
 
@@ -199,10 +203,21 @@ agent:
       # - lldp
       # - libvirt
       # - runc
+      # - vpp
+
+    docker:
+      # url: unix:///var/run/docker.sock
+      netns:
+        # allow to specify where the docker probe is watching network namespaces
+        # run_path: /var/run/docker/netns
 
     netlink:
       # delay in seconds between two metric updates
       # metrics_update: 30
+
+    netns:
+      # allow to specify where the netns probe is watching network namespace
+      # run_path: /var/run/netns
 
     # Define OpenStack Neutron credentials and the enpoint type
     # used by the neutron probe
@@ -231,6 +246,11 @@ agent:
       run_path:
         # - /var/run/runc
         # - /run/runc-ctrs
+
+    vpp:
+      # VPP API segment prefix connection, default : "" is equivalent to "/dev/shm"
+      # could be use when vpp and skydive are isolated in different container
+      # connect: ""
 
   capture:
     # Period in second to get capture stats from the probe. Note this
@@ -287,6 +307,9 @@ ovs:
     # Enable the parsing of openflow rules (disabled by default)
     # enable: false
 
+    # Use OpenFlow protocol instead of ovs-ofctl
+    # native: false
+
     # Openflow versions used by ovs-ofctl when queries are made to the
     # switch. 1.0 should always be supported. 1.3 gives a nicer output and
     # it is recommended to add it if it is supported.
@@ -309,9 +332,6 @@ ovs:
     address:
       # Map translating bridge names into URL for remote connection
       # - bridge: ssl:xxx.yyy.zzz.ttt:port
-
-docker:
-  # url: unix:///var/run/docker.sock
 
 netns:
   # allow to specify where the netns probe is watching network namespace
@@ -457,6 +477,12 @@ flow:
       # 1194: OPENVPN
     udp:
       # 1194: OPENVPN
+
+  # application specific flow timeout, in seconds
+  # this timeout is enforced in addition to the general flow.expire timeout
+  application_timeout:
+    # - arp: 10
+    # - dns: 10
 
 ui:
   # Specify the extra assets folder. Javascript and CSS files present in this

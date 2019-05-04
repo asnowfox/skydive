@@ -94,7 +94,7 @@ var LinkLabelLatency = Vue.extend({
 
     updateLatency: function(link, a, b) {
       link.latencyTimestamp = Math.max(a.Last, b.Last);
-      link.latency = Math.abs(a.RTT - b.RTT) / 1000000;
+      link.latency = Math.abs(a.Metric.RTT - b.Metric.RTT) / 1000000;
     },
 
     flowQuery: function(nodeTID, trackingID, limit) {
@@ -102,7 +102,7 @@ var LinkLabelLatency = Vue.extend({
       if (typeof trackingID !== 'undefined') {
         has += `"TrackingID", ${trackingID}`;
       }
-      has += `"RTT", NE(0)`;
+      has += `"Metric.RTT", NE(0)`;
       let query = `G.Flows().Has(${has}).Sort().Limit(${limit})`;
       return this.$topologyQuery(query)
     },
@@ -352,7 +352,7 @@ var TopologyGraphLayout = function(vm, selector) {
 
 TopologyGraphLayout.prototype = {
 
-  linkLabelFactory: function(link) {
+  linkL2LabelFactory: function(link) {
     let type, driver;
     switch (this.linkLabelType) {
       case "latency":
@@ -367,7 +367,6 @@ TopologyGraphLayout.prototype = {
     driver.setup(this);
     return driver;
   },
-
   notifyHandlers: function(ev, v1) {
     var self = this;
 
@@ -1482,29 +1481,37 @@ TopologyGraphLayout.prototype = {
   updateLinkLabelData: function() {
     var self = this;
 
-    const driver = self.linkLabelFactory();
+    const l2 = self.linkL2LabelFactory();
 
     for (var i in this.links) {
       var link = this.links[i];
 
       if (!link.source.visible || !link.target.visible)
         continue;
-      if (link.metadata.RelationType !== "layer2")
-        continue;
 
-      driver.updateData(link);
+      if (link.metadata.RelationType === "layer2") {
+        l2.updateData(link);
 
-      if (driver.hasData(link)) {
+	if (l2.hasData(link)) {
+	  this.linkLabelData[link.id] = {
+	    id: "link-label-" + link.id,
+	    link: link,
+	    text: driver.getText(link),
+	    active: driver.isActive(link),
+	    warning: driver.isWarning(link),
+	    alert: driver.isAlert(link),
+	  };
+	} else {
+	  delete this.linkLabelData[link.id];
+	}
+      }
+
+      if (link.metadata.hasOwnProperty('Weight')) {
         this.linkLabelData[link.id] = {
-          id: "link-label-" + link.id,
-          link: link,
-          text: driver.getText(link),
-          active: driver.isActive(link),
-          warning: driver.isWarning(link),
-          alert: driver.isAlert(link),
-        };
-      } else {
-        delete this.linkLabelData[link.id];
+	  id: "link-label-" + link.id,
+	  link: link,
+	  text: `${link.metadata.Weight}%`,
+	};
       }
     }
   },

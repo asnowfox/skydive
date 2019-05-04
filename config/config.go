@@ -40,19 +40,22 @@ var ErrNoAnalyzerSpecified = errors.New("No analyzer specified in the configurat
 var (
 	cfg           *viper.Viper
 	relocationMap = map[string][]string{
-		"agent.auth.api.backend":            {"auth.type"},
-		"agent.auth.cluster.password":       {"auth.analyzer_password"},
-		"agent.auth.cluster.username":       {"auth.analyzer_username"},
-		"agent.capture.stats_update":        {"agent.flow.stats_update"},
-		"analyzer.auth.api.backend":         {"auth.type"},
-		"analyzer.auth.cluster.backend":     {"auth.type"},
-		"analyzer.auth.cluster.password":    {"auth.analyzer_password"},
-		"analyzer.auth.cluster.username":    {"auth.analyzer_username"},
-		"analyzer.flow.backend":             {"analyzer.storage.backend"},
-		"analyzer.flow.max_buffer_size":     {"analyzer.storage.max_flow_buffer_size"},
-		"analyzer.topology.backend":         {"graph.backend"},
-		"analyzer.topology.k8s.config_file": {"k8s.config_file"},
-		"analyzer.topology.k8s.probes":      {"k8s.probes"},
+		"agent.auth.api.backend":               {"auth.type"},
+		"agent.auth.cluster.password":          {"auth.analyzer_password"},
+		"agent.auth.cluster.username":          {"auth.analyzer_username"},
+		"agent.capture.stats_update":           {"agent.flow.stats_update"},
+		"agent.topology.docker.url":            {"docker.url"},
+		"agent.topology.docker.netns.run_path": {"docker.netns.run_path"},
+		"agent.topology.netns.run_path":        {"netns.run_path"},
+		"analyzer.auth.api.backend":            {"auth.type"},
+		"analyzer.auth.cluster.backend":        {"auth.type"},
+		"analyzer.auth.cluster.password":       {"auth.analyzer_password"},
+		"analyzer.auth.cluster.username":       {"auth.analyzer_username"},
+		"analyzer.flow.backend":                {"analyzer.storage.backend"},
+		"analyzer.flow.max_buffer_size":        {"analyzer.storage.max_flow_buffer_size"},
+		"analyzer.topology.backend":            {"graph.backend"},
+		"analyzer.topology.k8s.config_file":    {"k8s.config_file"},
+		"analyzer.topology.k8s.probes":         {"k8s.probes"},
 	}
 )
 
@@ -76,8 +79,10 @@ func init() {
 	cfg.SetDefault("agent.flow.pcapsocket.max_port", 8132)
 	cfg.SetDefault("agent.listen", "127.0.0.1:8081")
 	cfg.SetDefault("agent.topology.probes", []string{"ovsdb"})
-	cfg.SetDefault("agent.topology.libvirt.url", "qemu:///system")
+	cfg.SetDefault("agent.topology.docker.url", "unix:///var/run/docker.sock")
+	cfg.SetDefault("agent.topology.docker.netns.run_path", "/var/run/docker/netns")
 	cfg.SetDefault("agent.topology.netlink.metrics_update", 30)
+	cfg.SetDefault("agent.topology.netns.run_path", "/var/run/netns")
 	cfg.SetDefault("agent.topology.neutron.domain_name", "Default")
 	cfg.SetDefault("agent.topology.neutron.endpoint_type", "public")
 	cfg.SetDefault("agent.topology.neutron.ssl_insecure", false)
@@ -86,6 +91,7 @@ func init() {
 	cfg.SetDefault("agent.topology.neutron.username", "neutron")
 	cfg.SetDefault("agent.topology.runc.run_path", []string{"/run/containerd/runc", "/run/runc", "/run/runc-ctrs"})
 	cfg.SetDefault("agent.topology.socketinfo.host_update", 10)
+	cfg.SetDefault("agent.topology.vpp.connect", "")
 
 	cfg.SetDefault("analyzer.auth.cluster.backend", "noauth")
 	cfg.SetDefault("analyzer.auth.api.backend", "noauth")
@@ -96,6 +102,7 @@ func init() {
 	cfg.SetDefault("analyzer.topology.backend", "memory")
 	cfg.SetDefault("analyzer.topology.probes", []string{})
 	cfg.SetDefault("analyzer.topology.k8s.config_file", "/etc/skydive/kubeconfig")
+	cfg.SetDefault("analyzer.topology.ovn.address", "unix:///var/run/openvswitch/ovnnb_db.sock")
 	cfg.SetDefault("analyzer.topology.istio.config_file", "/etc/skydive/kubeconfig")
 
 	cfg.SetDefault("auth.basic.type", "basic") // defined for backward compatibility
@@ -107,9 +114,6 @@ func init() {
 	cfg.SetDefault("cache.expire", 300)
 	cfg.SetDefault("cache.cleanup", 30)
 
-	cfg.SetDefault("docker.url", "unix:///var/run/docker.sock")
-	cfg.SetDefault("docker.netns.run_path", "/var/run/docker/netns")
-
 	cfg.SetDefault("etcd.client_timeout", 5)
 	cfg.SetDefault("etcd.data_dir", "/var/lib/skydive/etcd")
 	cfg.SetDefault("etcd.embedded", true)
@@ -119,6 +123,8 @@ func init() {
 	cfg.SetDefault("flow.expire", 600)
 	cfg.SetDefault("flow.update", 60)
 	cfg.SetDefault("flow.protocol", "udp")
+	cfg.SetDefault("flow.application_timeout.arp", 10)
+	cfg.SetDefault("flow.application_timeout.dns", 10)
 
 	cfg.SetDefault("host_id", host)
 
@@ -135,15 +141,13 @@ func init() {
 	cfg.SetDefault("logging.level", "INFO")
 	cfg.SetDefault("logging.syslog.tag", "skydive")
 
-	cfg.SetDefault("netns.run_path", "/var/run/netns")
-
 	cfg.SetDefault("opencontrail.host", "localhost")
 	cfg.SetDefault("opencontrail.mpls_udp_port", 51234)
 	cfg.SetDefault("opencontrail.port", 8085)
 
 	cfg.SetDefault("ovs.ovsdb", "unix:///var/run/openvswitch/db.sock")
 	cfg.SetDefault("ovs.oflow.enable", false)
-	cfg.SetDefault("ovs.oflow.openflow_versions", []string{"OpenFlow10"})
+	cfg.SetDefault("ovs.oflow.openflow_versions", []string{"OpenFlow10", "OpenFlow11", "OpenFlow12", "OpenFlow13", "OpenFlow14"})
 	cfg.SetDefault("ovs.enable_stats", false)
 
 	cfg.SetDefault("sflow.port_min", 6345)

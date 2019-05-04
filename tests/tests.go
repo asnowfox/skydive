@@ -28,10 +28,12 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/kballard/go-shellquote"
 	"github.com/skydive-project/skydive/agent"
 	"github.com/skydive-project/skydive/analyzer"
 	gclient "github.com/skydive-project/skydive/api/client"
@@ -69,7 +71,7 @@ analyzer:
   analyzer_password: password
   topology:
     backend: {{.TopologyBackend}}
-    probes: {{block "list" .}}{{"\n"}}{{range .AnalyzerProbes}}{{println "    -" .}}{{end}}{{end}}
+    probes: {{block "analyzerprobes" .}}{{"\n"}}{{range .AnalyzerProbes}}{{println "    -" .}}{{end}}{{end}}
   startup:
     capture_gremlin: "g.V().Has('Name','startup-vm2')"
 
@@ -77,15 +79,13 @@ agent:
   listen: {{.AgentAddr}}:{{.AgentPort}}
   topology:
     probes:
-      - netlink
-      - netns
-      - ovsdb
-      - docker
-      - lxd
-      - lldp
-      - runc
-      - socketinfo
-      {{.OpencontrailProbe}}
+    - ovsdb
+    - docker
+    - lxd
+    - lldp
+    - runc
+    - socketinfo
+    - libvirt{{block "agentProbes" .}}{{"\n"}}{{range .AgentProbes}}{{println "    -" .}}{{end}}{{end}}
     netlink:
       metrics_update: 5
     lldp:
@@ -93,14 +93,8 @@ agent:
       - lldp0
 
   metadata:
-    info: This is compute node
     mydict:
       value: 123
-      onearray:
-      - name: first
-        value: 1
-      - name: last
-        value: 10
     myarrays:
       integers:
       - 1
@@ -121,6 +115,9 @@ flow:
 ovs:
   oflow:
     enable: true
+    native: {{.OvsOflowNative}}
+    address:
+      br-test: tcp://127.0.0.1:16633
 
 storage:
   orientdb:
@@ -218,16 +215,15 @@ type Test struct {
 }
 
 var (
-	agentTestsOnly    bool
+	agentProbes       string
 	analyzerListen    string
 	analyzerProbes    string
 	etcdServer        string
 	flowBackend       string
 	graphOutputFormat string
-	noOFTests         bool
+	ovsOflowNative    bool
 	standalone        bool
 	topologyBackend   string
-	opencontrailProbe bool
 )
 
 func initConfig(conf string, params ...helperParams) error {
@@ -248,6 +244,7 @@ func initConfig(conf string, params ...helperParams) error {
 	params[0]["AnalyzerPort"] = sa.Port
 	params[0]["AgentAddr"] = sa.Addr
 	params[0]["AgentPort"] = sa.Port - 1
+	params[0]["OvsOflowNative"] = strconv.FormatBool(ovsOflowNative)
 
 	if testing.Verbose() {
 		params[0]["LogLevel"] = "DEBUG"
@@ -277,8 +274,8 @@ func initConfig(conf string, params ...helperParams) error {
 	if analyzerProbes != "" {
 		params[0]["AnalyzerProbes"] = strings.Split(analyzerProbes, ",")
 	}
-	if opencontrailProbe {
-		params[0]["OpencontrailProbe"] = "- opencontrail"
+	if agentProbes != "" {
+		params[0]["AgentProbes"] = strings.Split(agentProbes, ",")
 	}
 
 	tmpl, err := template.New("config").Parse(conf)
@@ -298,7 +295,10 @@ func initConfig(conf string, params ...helperParams) error {
 
 func execCmds(t *testing.T, cmds ...Cmd) (e error) {
 	for _, cmd := range cmds {
-		args := strings.Split(cmd.Cmd, " ")
+		args, err := shellquote.Split(cmd.Cmd)
+		if err != nil {
+			return err
+		}
 		command := exec.Command(args[0], args[1:]...)
 		logging.GetLogger().Debugf("Executing command %+v", args)
 		stdouterr, err := command.CombinedOutput()
@@ -307,7 +307,7 @@ func execCmds(t *testing.T, cmds ...Cmd) (e error) {
 		}
 		if err != nil {
 			if cmd.Check {
-				t.Fatal("cmd : ("+cmd.Cmd+") returned ", err.Error(), string(stdouterr))
+				return fmt.Errorf("cmd : (%s) returned error %s with output %s", cmd.Cmd, err, string(stdouterr))
 			}
 			e = err
 		}
@@ -431,14 +431,18 @@ func (c *TestContext) postmortem(t *testing.T, test *Test, timestamp time.Time) 
 // - execute the cleanup functions and commands
 // - replay the tests against the history with the recorded timestamps
 func RunTest(t *testing.T, test *Test) {
+	if standalone && !initStandalone {
+		runStandalone()
+	}
+
 	client, err := gclient.NewCrudClientFromConfig(&shttp.AuthenticationOpts{})
 	if err != nil {
 		t.Fatalf("Failed to create client: %s", err)
 	}
 
-	t.Log("Removing existing captures")
 	var captures []*types.Capture
 	defer func() {
+		t.Log("Removing existing captures")
 		for _, capture := range captures {
 			client.Delete("capture", capture.ID())
 		}
@@ -460,7 +464,11 @@ func RunTest(t *testing.T, test *Test) {
 	if test.preCleanup {
 		execCmds(t, test.tearDownCmds...)
 	}
-	execCmds(t, test.setupCmds...)
+
+	if err := execCmds(t, test.setupCmds...); err != nil {
+		execCmds(t, test.tearDownCmds...)
+		t.Fatal(err)
+	}
 
 	context := &TestContext{
 		gh:       gclient.NewGremlinQueryHelper(&shttp.AuthenticationOpts{}),
@@ -696,9 +704,11 @@ func RunTest(t *testing.T, test *Test) {
 		}
 	}
 
-	execCmds(t, test.tearDownCmds...)
+	if err := execCmds(t, test.tearDownCmds...); err != nil {
+		t.Fatal(err)
+	}
 
-	if test.mode == Replay && agentTestsOnly == false {
+	if test.mode == Replay {
 		if topologyBackend != "memory" {
 			for i, check := range test.checks {
 				checkContext := test.checkContexts[i]
@@ -787,17 +797,37 @@ func delaySec(sec int, err ...error) error {
 	return delay(time.Duration(sec)*time.Second, err...)
 }
 
+var initStandalone = false
+
+func runStandalone() {
+	server, err := analyzer.NewServerFromConfig()
+	if err != nil {
+		panic(err)
+	}
+	server.Start()
+
+	agent, err := agent.NewAgent()
+	if err != nil {
+		panic(err)
+	}
+
+	agent.Start()
+
+	// TODO: check for storage status instead of sleeping
+	time.Sleep(3 * time.Second)
+	initStandalone = true
+}
+
 func init() {
 	flag.BoolVar(&standalone, "standalone", false, "Start an analyzer and an agent")
-	flag.BoolVar(&agentTestsOnly, "agenttestsonly", false, "run agent test only")
-	flag.BoolVar(&noOFTests, "nooftests", false, "dont't run OpenFlow tests")
 	flag.StringVar(&etcdServer, "etcd.server", "", "Etcd server")
 	flag.StringVar(&topologyBackend, "analyzer.topology.backend", "memory", "Specify the graph storage backend used")
 	flag.StringVar(&graphOutputFormat, "graph.output", "", "Graph output format (json, dot or ascii)")
 	flag.StringVar(&flowBackend, "analyzer.flow.backend", "", "Specify the flow storage backend used")
 	flag.StringVar(&analyzerListen, "analyzer.listen", "0.0.0.0:64500", "Specify the analyzer listen address")
 	flag.StringVar(&analyzerProbes, "analyzer.topology.probes", "", "Specify the analyzer probes to enable")
-	flag.BoolVar(&opencontrailProbe, "opencontrail", false, "Enable opencontrail probe")
+	flag.StringVar(&agentProbes, "agent.topology.probes", "", "Specify the extra agent probes to enable")
+	flag.BoolVar(&ovsOflowNative, "ovs.oflow.native", false, "Use native OpenFlow protocol instead of ovs-ofctl")
 	flag.Parse()
 
 	http.DefaultTransport.(*http.Transport).MaxIdleConnsPerHost = 100
@@ -808,23 +838,5 @@ func init() {
 
 	if err := config.InitLogging(); err != nil {
 		panic(fmt.Sprintf("Failed to initialize logging system: %s", err))
-	}
-
-	if standalone {
-		server, err := analyzer.NewServerFromConfig()
-		if err != nil {
-			panic(err)
-		}
-		server.Start()
-
-		agent, err := agent.NewAgent()
-		if err != nil {
-			panic(err)
-		}
-
-		agent.Start()
-
-		// TODO: check for storage status instead of sleeping
-		time.Sleep(3 * time.Second)
 	}
 }

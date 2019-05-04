@@ -34,7 +34,10 @@ type destinationRuleHandler struct {
 func (h *destinationRuleHandler) Map(obj interface{}) (graph.Identifier, graph.Metadata) {
 	dr := obj.(*kiali.DestinationRule)
 	m := k8s.NewMetadataFields(&dr.ObjectMeta)
-	return graph.Identifier(dr.GetUID()), k8s.NewMetadata(Manager, "destinationrule", m, dr, dr.Name)
+	metadata := k8s.NewMetadata(Manager, "destinationrule", m, dr, dr.Name)
+	metadata.SetField("TrafficPolicy", dr.Spec["trafficPolicy"] != nil)
+	metadata.SetField("HostName", dr.Spec["host"])
+	return graph.Identifier(dr.GetUID()), metadata
 }
 
 // Dump k8s resource
@@ -47,16 +50,34 @@ func newDestinationRuleProbe(client interface{}, g *graph.Graph) k8s.Subprobe {
 	return k8s.NewResourceCache(client.(*kiali.IstioClient).GetIstioNetworkingApi(), &kiali.DestinationRule{}, "destinationrules", g, &destinationRuleHandler{})
 }
 
-type destinationRuleSpec struct {
-	App string `mapstructure:"host"`
-}
-
 func destinationRuleServiceAreLinked(a, b interface{}) bool {
 	dr := a.(*kiali.DestinationRule)
 	service := b.(*v1.Service)
-	return dr.Spec["host"] == service.Labels["app"]
+	return k8s.MatchNamespace(dr, service) && dr.Spec["host"] == service.Labels["app"]
+}
+
+func destinationRuleServiceEntryAreLinked(a, b interface{}) bool {
+	dr := a.(*kiali.DestinationRule)
+	se := b.(*kiali.ServiceEntry)
+	if !k8s.MatchNamespace(dr, se) {
+		return false
+	}
+	if dr.Spec["host"] == nil || se.Spec["hosts"] == nil {
+		return false
+	}
+	seHosts := se.Spec["hosts"].([]interface{})
+	for _, seHost := range seHosts {
+		if seHost == dr.Spec["host"] {
+			return true
+		}
+	}
+	return false
 }
 
 func newDestinationRuleServiceLinker(g *graph.Graph) probe.Probe {
 	return k8s.NewABLinker(g, Manager, "destinationrule", k8s.Manager, "service", destinationRuleServiceAreLinked)
+}
+
+func newDestinationRuleServiceEntryLinker(g *graph.Graph) probe.Probe {
+	return k8s.NewABLinker(g, Manager, "destinationrule", Manager, "serviceentry", destinationRuleServiceEntryAreLinked)
 }

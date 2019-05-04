@@ -75,7 +75,7 @@ type Capture struct {
 	BPFFilter      string           `json:"BPFFilter,omitempty" valid:"isBPFFilter" yaml:"BPFFilter"`
 	Name           string           `json:"Name,omitempty" yaml:"Name"`
 	Description    string           `json:"Description,omitempty" yaml:"Description"`
-	Type           string           `json:"Type,omitempty" yaml:"Type"`
+	Type           string           `json:"Type,omitempty" valid:"isValidCaptureType" yaml:"Type"`
 	Count          int              `json:"Count" yaml:"Count"`
 	PCAPSocket     string           `json:"PCAPSocket,omitempty" yaml:"PCAPSocket"`
 	Port           int              `json:"Port,omitempty" yaml:"Port"`
@@ -161,6 +161,7 @@ type PacketInjection struct {
 	IncrementPayload int64 `yaml:"IncrementPayload"`
 	StartTime        time.Time
 	Pcap             []byte `yaml:"Pcap"`
+	TTL              uint8  `yaml:"TTL"`
 }
 
 // Validate verifies the packet injection type is supported
@@ -199,6 +200,11 @@ type Workflow struct {
 	Description   string          `yaml:"Description"`
 	Parameters    []WorkflowParam `yaml:"Parameters"`
 	Source        string          `valid:"isValidWorkflow" yaml:"Source"`
+}
+
+// WorkflowCall describes workflow call
+type WorkflowCall struct {
+	Params []interface{}
 }
 
 func init() {

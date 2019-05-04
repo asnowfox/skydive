@@ -23,6 +23,7 @@ import (
 
 	"github.com/google/gopacket/layers"
 	"github.com/skydive-project/skydive/common"
+	"github.com/skydive-project/skydive/config"
 	"github.com/skydive-project/skydive/filters"
 )
 
@@ -200,5 +201,71 @@ func TestUpdate(t *testing.T) {
 
 	if received != 3 {
 		t.Errorf("Should have been notified : %+v", flow2)
+	}
+}
+
+func TestAppSpecificTimeout(t *testing.T) {
+	var received int
+	callback := func(f *FlowArray) {
+		received += len(f.Flows)
+	}
+	updHandler := NewFlowHandler(callback, time.Second)
+	expHandler := NewFlowHandler(func(f *FlowArray) {}, 300*time.Second)
+
+	config.GetConfig().Set("flow.application_timeout.arp", 10)
+	config.GetConfig().Set("flow.application_timeout.dns", 20)
+
+	table := NewTable(updHandler, expHandler, "", TableOpts{})
+
+	flowsTime := time.Now()
+
+	arpFlow, _ := table.getOrCreateFlow("arpFlow")
+	arpFlow.Last = common.UnixMillis(flowsTime)
+	arpFlow.Application = "ARP"
+
+	dnsFlow, _ := table.getOrCreateFlow("dnsFlow")
+	dnsFlow.Last = common.UnixMillis(flowsTime)
+	dnsFlow.Application = "DNS"
+
+	table.updateAt(flowsTime.Add(time.Duration(15) * time.Second))
+
+	if received == 0 || arpFlow.FinishType != FlowFinishType_TIMEOUT {
+		t.Errorf("Should have been notified : %+v", arpFlow)
+	}
+
+	if received > 1 || dnsFlow.FinishType != FlowFinishType_NOT_FINISHED {
+		t.Errorf("Should not have been notified : %+v", dnsFlow)
+	}
+}
+
+func TestHold(t *testing.T) {
+	updHandler := NewFlowHandler(func(f *FlowArray) {}, 60*time.Second)
+	expHandler := NewFlowHandler(func(f *FlowArray) {}, 600*time.Second)
+
+	table := NewTable(updHandler, expHandler, "", TableOpts{})
+
+	flowTime := time.Now()
+
+	flow1, _ := table.getOrCreateFlow("flow1")
+	flow1.Last = common.UnixMillis(flowTime)
+	flow1.FinishType = FlowFinishType_TCP_FIN
+
+	table.updateAt(flowTime.Add(time.Duration(5) * time.Second))
+	if len(table.table) != 1 {
+		t.Error("Flow should not have been deleted by update")
+	}
+	table.updateAt(flowTime.Add(time.Duration(15) * time.Second))
+	if len(table.table) != 0 {
+		t.Error("Flow should have been deleted by update")
+	}
+
+	flow2, _ := table.getOrCreateFlow("flow2")
+	flow2.Last = common.UnixMillis(flowTime)
+	flow2.FinishType = FlowFinishType_TCP_FIN
+	table.updateAt(flowTime.Add(time.Duration(5) * time.Second))
+	flow2.FinishType = FlowFinishType_NOT_FINISHED
+	table.updateAt(flowTime.Add(time.Duration(15) * time.Second))
+	if len(table.table) != 1 {
+		t.Error("Updated flow should not have been deleted by update")
 	}
 }

@@ -18,6 +18,7 @@
 package flow
 
 import (
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -26,9 +27,13 @@ import (
 	"github.com/google/gopacket/layers"
 
 	"github.com/skydive-project/skydive/common"
+	"github.com/skydive-project/skydive/config"
 	"github.com/skydive-project/skydive/filters"
 	"github.com/skydive-project/skydive/logging"
 )
+
+// HoldTimeoutMilliseconds is the number of milliseconds for holding ended flows before they get deleted from the flow table
+const HoldTimeoutMilliseconds = int64(time.Duration(15) * time.Second / time.Millisecond)
 
 // ExpireUpdateFunc defines expire and updates callback
 type ExpireUpdateFunc func(f *FlowArray)
@@ -81,6 +86,7 @@ type Table struct {
 	tcpAssembler      *TCPAssembler
 	flowOpts          Opts
 	appPortMap        *ApplicationPortMap
+	appTimeout        map[string]int64
 }
 
 // OperationType operation type of a Flow in a flow table
@@ -100,8 +106,21 @@ type Operation struct {
 	Type OperationType
 }
 
+func updateTCPFlagTime(prevFlagTime int64, currFlagTime int64) int64 {
+	if prevFlagTime != 0 {
+		return prevFlagTime
+	}
+	return currFlagTime
+}
+
 // NewTable creates a new flow table
 func NewTable(updateHandler *Handler, expireHandler *Handler, nodeTID string, opts ...TableOpts) *Table {
+	appTimeout := make(map[string]int64)
+	for key := range config.GetConfig().GetStringMap("flow.application_timeout") {
+		// convert seconds to milleseconds
+		appTimeout[strings.ToUpper(key)] = int64(1000 * config.GetConfig().GetInt("flow.application_timeout."+key))
+	}
+
 	t := &Table{
 		packetSeqChan:     make(chan *PacketSequence, 1000),
 		flowChanOperation: make(chan *Operation, 1000),
@@ -116,6 +135,7 @@ func NewTable(updateHandler *Handler, expireHandler *Handler, nodeTID string, op
 		ipDefragger:       NewIPDefragger(),
 		tcpAssembler:      NewTCPAssembler(),
 		appPortMap:        NewApplicationPortMapFromConfig(),
+		appTimeout:        appTimeout,
 	}
 	if len(opts) > 0 {
 		t.Opts = opts[0]
@@ -195,8 +215,10 @@ func (ft *Table) expire(expireBefore int64) {
 			}
 
 			logging.GetLogger().Debugf("Expire flow %s Duration %v", f.UUID, duration)
-			f.FinishType = FlowFinishType_TIMEOUT
-			expiredFlows = append(expiredFlows, f)
+			if f.FinishType == FlowFinishType_NOT_FINISHED {
+				f.FinishType = FlowFinishType_TIMEOUT
+				expiredFlows = append(expiredFlows, f)
+			}
 
 			// need to use the key as the key could be not equal to the UUID
 			delete(ft.table, k)
@@ -225,6 +247,7 @@ func (ft *Table) updateMetric(f *Flow, start, last int64) {
 	f.LastUpdateMetric.ABBytes = f.Metric.ABBytes
 	f.LastUpdateMetric.BAPackets = f.Metric.BAPackets
 	f.LastUpdateMetric.BABytes = f.Metric.BABytes
+	f.LastUpdateMetric.RTT = f.Metric.RTT
 
 	// subtract previous values to get the diff so that we store the
 	// amount of data between two updates
@@ -249,14 +272,19 @@ func (ft *Table) update(updateFrom, updateTime int64) {
 		if f.XXX_state.updateVersion > ft.updateVersion {
 			ft.updateMetric(f, updateFrom, updateTime)
 			updatedFlows = append(updatedFlows, f)
-			if f.FinishType != FlowFinishType_NOT_FINISHED {
-				delete(ft.table, k)
-			}
+		} else if updateTime-f.Last > ft.appTimeout[f.Application] && ft.appTimeout[f.Application] > 0 {
+			updatedFlows = append(updatedFlows, f)
+			f.FinishType = FlowFinishType_TIMEOUT
+			delete(ft.table, k)
 		} else {
 			f.LastUpdateMetric = &FlowMetric{Start: updateFrom, Last: updateTime}
 		}
 
 		f.XXX_state.lastMetric = f.Metric.Copy()
+
+		if f.FinishType != FlowFinishType_NOT_FINISHED && updateTime-f.Last >= HoldTimeoutMilliseconds {
+			delete(ft.table, k)
+		}
 	}
 
 	if len(updatedFlows) != 0 {
@@ -392,17 +420,27 @@ func (ft *Table) processFlowOP(op *Operation) {
 			return
 		}
 
-		// NOTE(safchain) keep it simple for now. Need to add TCPMetric and some
-		// other metrics.
 		fl.Metric.ABBytes += op.Flow.Metric.ABBytes
 		fl.Metric.BABytes += op.Flow.Metric.BABytes
 		fl.Metric.ABPackets += op.Flow.Metric.ABPackets
 		fl.Metric.BAPackets += op.Flow.Metric.BAPackets
 
 		fl.Last = op.Flow.Last
+		if fl.Transport != nil && fl.Transport.Protocol == FlowProtocol_TCP && fl.TCPMetric != nil {
+			fl.TCPMetric = &TCPMetric{
+				ABSynStart: updateTCPFlagTime(fl.TCPMetric.ABSynStart, op.Flow.TCPMetric.ABSynStart),
+				BASynStart: updateTCPFlagTime(fl.TCPMetric.BASynStart, op.Flow.TCPMetric.BASynStart),
+				ABFinStart: updateTCPFlagTime(fl.TCPMetric.ABFinStart, op.Flow.TCPMetric.ABFinStart),
+				BAFinStart: updateTCPFlagTime(fl.TCPMetric.BAFinStart, op.Flow.TCPMetric.BAFinStart),
+				ABRstStart: updateTCPFlagTime(fl.TCPMetric.ABRstStart, op.Flow.TCPMetric.ABRstStart),
+				BARstStart: updateTCPFlagTime(fl.TCPMetric.BARstStart, op.Flow.TCPMetric.BARstStart),
+			}
+		}
 
-		if fl.RTT == 0 && fl.Metric.ABPackets > 0 && fl.Metric.BAPackets > 0 {
-			fl.RTT = fl.Last - fl.Start
+		// TODO(safchain) remove this should be provided by the sender
+		// with a good time resolution
+		if fl.Metric.RTT == 0 && fl.Metric.ABPackets > 0 && fl.Metric.BAPackets > 0 {
+			fl.Metric.RTT = fl.Last - fl.Start
 		}
 	}
 }

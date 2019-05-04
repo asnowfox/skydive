@@ -1,80 +1,14 @@
 ---
-- include: fedora.yml
+- include_tasks: fedora.yml
   when: ansible_distribution == "Fedora"
 
-- include: centos.yml
+- include_tasks: centos.yml
   when: ansible_distribution == "CentOS"
 
-- package:
-    name: "{{ item }}"
-    state: present
-  with_items:
-     - git
-     - wget
-     - unzip
-     - gcc
-     - make
-     - openvswitch
-     - docker
-     - libpcap-devel
-     - libxml2-devel
-     - screen
-     - inotify-tools
-     - iperf
-     - libselinux-python
-     - bridge-utils
-     - perl-Graph-Easy
-     - rpm-build
-     - rpmlint
-     - libvirt
-     - libvirt-devel
-     - libvirt-client
-     - vagrant-libvirt
-     - ansible
-     - numactl-devel
-     - kernel-devel
-     - python3-virtualenv
-     - llvm-devel
-     - clang-devel
-     - bcc-devel
-     - elfutils-libelf-devel
-     - kubernetes-client
-     - jq
-     - aria2
-     - tcpdump
-     - socat
-     - python2-virtualenv
-     - python3-virtualenv
-     - virt-what
-     - selinux-policy-devel
-     - policycoreutils-devel
-     - mock
-     - yum-utils
-     - manifest-tool
-     - ffmpeg
-     - npm
-     - gifsicle
-     - podman
+- include_tasks: runtime.yml
 
-- service:
-    name: "{{ item }}"
-    state: started
-    enabled: yes
-  with_items:
-    - openvswitch
-    - docker
+- include_tasks: build.yml
 
-- include: lxd.yml
-  when: ansible_distribution == "Fedora" and ansible_architecture == "x86_64"
+- include_tasks: tests.yml
 
-- include: protobuf.yml
-
-- include: static.yml
-
-- include: gimme.yml
-  tags:
-    - vagrant
-
-- include: docker.yml
-  tags:
-    - vagrant
+- include_tasks: ci.yml

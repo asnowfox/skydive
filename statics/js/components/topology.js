@@ -282,6 +282,8 @@ var TopologyComponent = {
       topologyMode: "live",
       topologyHumanTimeContext: "",
       isTopologyOptionsVisible: false,
+      defaultFilter: "",
+      defaultEmphasize: "",
       timeType: "absolute",
       topologyRelTime: "1m",
       metadataCollapseState: {
@@ -579,12 +581,12 @@ var TopologyComponent = {
     },
 
     topologyFilterClear: function () {
-      this.topologyFilter = '';
+      this.topologyFilter = this.defaultFilter;
       this.topologyFilterQuery();
      },
 
     topologyEmphasizeClear: function () {
-      this.topologyEmphasize = '';
+      this.topologyEmphasize = this.defaultEmphasize;
       this.emphasizeGremlinExpr();
      },
 
@@ -670,6 +672,9 @@ var TopologyComponent = {
 
         self.addFilterK8sTypes(filter, "storage", ["cluster", "container", "namespace", "persistentvolume", "persistentvolumeclaim", "pod", "storageclass"]);
         self.addFilterK8sTypes(highlight, "storage", ["container", "persistentvolume", "persistentvolumeclaim", "pod", "storageclass"]);
+
+        self.addFilterK8sTypes(filter, "config", ["cluster", "configmap", "container", "namespace", "pod", "secret"]);
+        self.addFilterK8sTypes(highlight, "config", ["configmap", "secret"]);
       }
 
       if (self.isIstioEnabled()) {
@@ -679,14 +684,14 @@ var TopologyComponent = {
 
       var default_filter = app.getConfigValue('topology.default_filter');
       if (default_filter) {
-        var value = favorites[default_filter];
-        if (value) self.topologyFilter = value;
+        self.defaultFilter = favorites[default_filter];
+        if (self.defaultFilter) self.topologyFilter = self.defaultFilter;
       }
 
       var default_highlight = app.getConfigValue('topology.default_highlight');
       if (default_highlight) {
-        var value = favorites[default_highlight];
-        if (value) self.topologyEmphasize = value;
+        self.defaultEmphasize = favorites[default_highlight];
+        if (self.defaultEmphasize) self.topologyEmphasize = value;
       }
     },
 
@@ -896,17 +901,18 @@ var TopologyComponent = {
     },
 
     normalizeMetric: function(metric) {
-      if (metric.Start && metric.Last && (metric.Last - metric.Start) > 0) {
-        bps = Math.floor(1000 * 8 * ((metric.RxBytes || 0) + (metric.TxBytes || 0)) / (metric.Last - metric.Start));
-        metric["Bandwidth"] = bandwidthToString(bps);
+      var metricCopy = JSON.parse(JSON.stringify(metric));
+      if (metricCopy.Start && metricCopy.Last && (metricCopy.Last - metricCopy.Start) > 0) {
+        bps = Math.floor(1000 * 8 * ((metricCopy.RxBytes || 0) + (metricCopy.TxBytes || 0)) / (metricCopy.Last - metricCopy.Start));
+        metricCopy["Bandwidth"] = bandwidthToString(bps);
       }
 
       ['Start', 'Last'].forEach(function(k) {
-        if (metric[k] && typeof metric[k] === 'number') {
-          metric[k] = new Date(metric[k]).toLocaleTimeString();
+        if (metricCopy[k] && typeof metricCopy[k] === 'number') {
+          metricCopy[k] = new Date(metricCopy[k]).toLocaleTimeString();
         }
       });
-      return metric;
+      return metricCopy;
     },
 
     extractMetadata: function(metadata, exclude) {

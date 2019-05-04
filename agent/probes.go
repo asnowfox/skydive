@@ -36,6 +36,7 @@ import (
 	"github.com/skydive-project/skydive/topology/probes/ovsdb"
 	"github.com/skydive-project/skydive/topology/probes/runc"
 	"github.com/skydive-project/skydive/topology/probes/socketinfo"
+	"github.com/skydive-project/skydive/topology/probes/vpp"
 )
 
 // NewTopologyProbeBundleFromConfig creates a new topology probe.Bundle based on the configuration
@@ -68,21 +69,28 @@ func NewTopologyProbeBundleFromConfig(g *graph.Graph, hostNode *graph.Node) (*pr
 
 		switch t {
 		case "ovsdb":
-			probes[t] = ovsdb.NewProbeFromConfig(g, hostNode)
+			addr := config.GetString("ovs.ovsdb")
+			enableStats := config.GetBool("ovs.enable_stats")
+			ovsProbe, err := ovsdb.NewProbeFromConfig(g, hostNode, addr, enableStats)
+			if err != nil {
+				return nil, fmt.Errorf("Failed to initialize OVS probe: %s", err)
+			}
+			probes[t] = ovsProbe
 		case "lxd":
 			lxdURL := config.GetConfig().GetString("lxd.url")
-			Probe, err := lxd.NewProbe(nsProbe, lxdURL)
+			lxdProbe, err := lxd.NewProbe(nsProbe, lxdURL)
 			if err != nil {
 				return nil, fmt.Errorf("Failed to initialize LXD probe: %s", err)
 			}
-			probes[t] = Probe
+			probes[t] = lxdProbe
 		case "docker":
-			dockerURL := config.GetString("docker.url")
-			Probe, err := docker.NewProbe(nsProbe, dockerURL)
+			dockerURL := config.GetString("agent.topology.docker.url")
+			netnsRunPath := config.GetString("agent.topology.docker.netns.run_path")
+			dockerProbe, err := docker.NewProbe(nsProbe, dockerURL, netnsRunPath)
 			if err != nil {
 				return nil, fmt.Errorf("Failed to initialize Docker probe: %s", err)
 			}
-			probes[t] = Probe
+			probes[t] = dockerProbe
 		case "lldp":
 			interfaces := config.GetStringSlice("agent.topology.lldp.interfaces")
 			lldpProbe, err := lldp.NewProbe(g, hostNode, interfaces)
@@ -116,6 +124,12 @@ func NewTopologyProbeBundleFromConfig(g *graph.Graph, hostNode *graph.Node) (*pr
 				return nil, fmt.Errorf("Failed to initialize runc probe: %s", err)
 			}
 			probes[t] = runc
+		case "vpp":
+			vpp, err := vpp.NewProbeFromConfig(g, hostNode)
+			if err != nil {
+				return nil, fmt.Errorf("Failed to initialize vpp probe: %s", err)
+			}
+			probes[t] = vpp
 		default:
 			logging.GetLogger().Errorf("unknown probe type %s", t)
 		}

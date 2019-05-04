@@ -151,19 +151,26 @@ func (c *KubeCache) onDelete(obj interface{}) {
 	}
 }
 
-func matchSelector(obj metav1.Object, selector labels.Selector) bool {
+// MatchNamespace true if namespaces are identical
+func MatchNamespace(obj1, obj2 metav1.Object) bool {
+	return obj1.GetNamespace() == obj2.GetNamespace()
+}
+
+func matchSelector(obj metav1.Object, selector labels.Selector, matchEmpty ...bool) bool {
+	if selector.Empty() && len(matchEmpty) > 0 && !matchEmpty[0] {
+		return false
+	}
 	return selector.Matches(labels.Set(obj.GetLabels()))
 }
 
-func matchLabelSelector(obj metav1.Object, labelSelector *metav1.LabelSelector) bool {
+func matchLabelSelector(obj metav1.Object, labelSelector *metav1.LabelSelector, matchEmpty ...bool) bool {
 	selector, err := metav1.LabelSelectorAsSelector(labelSelector)
-	return err == nil && selector.Matches(labels.Set(obj.GetLabels()))
+	return err == nil && matchSelector(obj, selector, matchEmpty...)
 }
 
-func matchMapSelector(obj metav1.Object, mapSelector map[string]string) bool {
+func matchMapSelector(obj metav1.Object, mapSelector map[string]string, matchEmpty ...bool) bool {
 	labelSelector := &metav1.LabelSelector{MatchLabels: mapSelector}
-	selector, err := metav1.LabelSelectorAsSelector(labelSelector)
-	return err == nil && selector.Matches(labels.Set(obj.GetLabels()))
+	return matchLabelSelector(obj, labelSelector, matchEmpty...)
 }
 
 func filterObjectsBySelector(objects []interface{}, labelSelector *metav1.LabelSelector, namespace ...string) (out []metav1.Object) {
@@ -254,4 +261,20 @@ func NewResourceCache(restClient rest.Interface, objType runtime.Object, resourc
 	}
 	c.KubeCache = RegisterKubeCache(restClient, objType, resources, c)
 	return c
+}
+
+func mapStringToList(data map[string]string) []string {
+	newData := []string{}
+	for key := range data {
+		newData = append(newData, key)
+	}
+	return newData
+}
+
+func mapBytesToList(data map[string][]byte) []string {
+	newData := []string{}
+	for key := range data {
+		newData = append(newData, key)
+	}
+	return newData
 }

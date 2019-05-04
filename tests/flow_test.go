@@ -662,6 +662,11 @@ func TestFlowMetrics(t *testing.T) {
 				return fmt.Errorf("Wrong number of flow, should have none, got : %v", metric)
 			}
 
+			metric, err = getFirstFlowMetric(gremlin.Has("Metric.RTT", g.Gt(0)))
+			if err != nil || metric == nil {
+				return fmt.Errorf("Wrong number of flow, should have none, got : %v", metric)
+			}
+
 			return nil
 		}},
 	}
@@ -1080,13 +1085,15 @@ func TestICMP(t *testing.T) {
 }
 
 func TestFlowGRETunnel(t *testing.T) {
-	testFlowTunnel(t, "br-fgt", "gre", false, "192.168.0.1", "192.168.0.2",
+	test := testFlowTunnel(t, "br-fgt", "gre", false, "192.168.0.1", "192.168.0.2",
 		"172.16.0.1", "172.16.0.2", "192.168.0.0/24")
+	RunTest(t, test)
 }
 
 func TestFlowVxlanTunnel(t *testing.T) {
-	testFlowTunnel(t, "br-fvt", "vxlan", false, "192.168.0.1", "192.168.0.2",
+	test := testFlowTunnel(t, "br-fvt", "vxlan", false, "192.168.0.1", "192.168.0.2",
 		"172.16.0.1", "172.16.0.2", "192.168.0.0/24")
+	RunTest(t, test)
 }
 
 func TestIPv6FlowGRETunnelIPv6(t *testing.T) {
@@ -1096,11 +1103,12 @@ func TestIPv6FlowGRETunnelIPv6(t *testing.T) {
 		t.Skipf("Platform doesn't support IPv6")
 	}
 
-	testFlowTunnel(t, "br-fgtv6", "gre", true, "fdfe:38b:489c::1", "fdfe:38b:489c::2",
+	test := testFlowTunnel(t, "br-fgtv6", "gre", true, "fdfe:38b:489c::1", "fdfe:38b:489c::2",
 		"fd49:37c8:5229::1", "fd49:37c8:5229::2", "fdfe:38b:489c::/48")
+	RunTest(t, test)
 }
 
-func testFlowTunnel(t *testing.T, bridge string, tunnelType string, ipv6 bool, IP1, IP2, tunnelIP1, tunnelIP2, addrRange string) {
+func testFlowTunnel(t *testing.T, bridge string, tunnelType string, ipv6 bool, IP1, IP2, tunnelIP1, tunnelIP2, addrRange string) *Test {
 	var (
 		tunnel1Add   string
 		tunnel2Add   string
@@ -1175,7 +1183,7 @@ func testFlowTunnel(t *testing.T, bridge string, tunnelType string, ipv6 bool, I
 
 		captures: []TestCapture{
 			{gremlin: g.G.V().Has("Name", "tunnel-vm1").Out().Has("Name", "tunnel")},
-			{gremlin: g.G.V().Has("Name", "tunnel-vm2-eth0")},
+			{gremlin: g.G.V().Has("Name", "tunnel-vm2-eth0", "Type", "veth")},
 		},
 
 		injections: []TestInjection{{
@@ -1226,8 +1234,7 @@ func testFlowTunnel(t *testing.T, bridge string, tunnelType string, ipv6 bool, I
 			return nil
 		}},
 	}
-
-	RunTest(t, test)
+	return test
 }
 
 func TestReplayCapture(t *testing.T) {
@@ -2020,7 +2027,7 @@ func TestSFlowCapture(t *testing.T) {
 			{"ip netns exec sfct-vm2 ip address add 169.254.29.12/24 dev sfct-intf2", true},
 			{"ip netns exec sfct-vm2 ip link set sfct-intf2 up", true},
 
-			{"ovs-vsctl --id=@sflow create sflow agent=lo target=\"127.0.0.1:6343\" header=128 sampling=1 polling=10 -- set bridge br-sfct sflow=@sflow", true},
+			{"ovs-vsctl --id=@sflow create sflow agent=lo target=\\\"127.0.0.1:6343\\\" header=128 sampling=1 polling=10 -- set bridge br-sfct sflow=@sflow", true},
 		},
 
 		injections: []TestInjection{{

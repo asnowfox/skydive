@@ -1,4 +1,4 @@
-// +build libvirt,linux
+// +build linux
 
 /*
  * Copyright (C) 2018 Orange.
@@ -22,13 +22,15 @@ package libvirt
 import (
 	"context"
 	"encoding/xml"
+	"errors"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/skydive-project/skydive/config"
 	"github.com/skydive-project/skydive/topology"
 
-	libvirtgo "github.com/libvirt/libvirt-go"
+	libvirt "github.com/digitalocean/go-libvirt"
 	"github.com/skydive-project/skydive/graffiti/graph"
 	"github.com/skydive-project/skydive/logging"
 )
@@ -37,114 +39,229 @@ import (
 type Probe struct {
 	sync.Mutex
 	graph        *graph.Graph          // the graph
-	conn         *libvirtgo.Connect    // libvirt conection
+	conn         monitor               // libvirt connection
 	interfaceMap map[string]*Interface // Found interfaces not yet connected.
-	cidLifecycle int                   // libvirt callback id of monitor to unregister
-	cidDevAdded  int                   // second monitor on devices added to domains
 	uri          string                // uri of the libvirt connection
 	cancel       context.CancelFunc    // cancel function
 	root         *graph.Node           // root node for ownership
-	tunProcessor *graph.Processor      // metadata indexer
+	tunProcessor *graph.Processor      // metadata indexer for regular interfaces
+}
+
+// monitor abstracts a libvirt monitor
+type monitor interface {
+	AllDomains() ([]domain, error)
+	Stop()
+}
+
+// domain abstracts a libvirt domain
+type domain interface {
+	GetName() (string, error)
+	GetState() (DomainState, int, error)
+	GetXML() ([]byte, error)
 }
 
 // Address describes the XML coding of the pci addres of an interface in libvirt
 type Address struct {
-	Type     string `xml:"type,attr"`
+	Type     string `xml:"type,attr,omitempty"`
 	Domain   string `xml:"domain,attr"`
 	Bus      string `xml:"bus,attr"`
 	Slot     string `xml:"slot,attr"`
 	Function string `xml:"function,attr"`
 }
 
+// Source describe the XML coding of a libvirt source
+type Source struct {
+	Address *Address `xml:"address"`
+}
+
+// DomainState describes the state of a domain
+type DomainState = libvirt.DomainState
+
 // DomainStateMap stringifies the state of a domain
-var DomainStateMap map[libvirtgo.DomainState]string = map[libvirtgo.DomainState]string{
-	libvirtgo.DOMAIN_NOSTATE:     "UNDEFINED",
-	libvirtgo.DOMAIN_RUNNING:     "UP",
-	libvirtgo.DOMAIN_BLOCKED:     "BLOCKED",
-	libvirtgo.DOMAIN_PAUSED:      "PAUSED",
-	libvirtgo.DOMAIN_SHUTDOWN:    "DOWN",
-	libvirtgo.DOMAIN_CRASHED:     "CRASHED",
-	libvirtgo.DOMAIN_PMSUSPENDED: "PMSUSPENDED",
-	libvirtgo.DOMAIN_SHUTOFF:     "DOWN",
+var DomainStateMap = map[DomainState]string{
+	libvirt.DomainNostate:     "UNDEFINED",
+	libvirt.DomainRunning:     "UP",
+	libvirt.DomainBlocked:     "BLOCKED",
+	libvirt.DomainPaused:      "PAUSED",
+	libvirt.DomainShutdown:    "DOWN",
+	libvirt.DomainCrashed:     "CRASHED",
+	libvirt.DomainPmsuspended: "PMSUSPENDED",
+	libvirt.DomainShutoff:     "DOWN",
 }
 
 // Interface is XML coding of an interface in libvirt
 type Interface struct {
-	Mac struct {
+	Type string `xml:"type,attr,omitempty"`
+	Mac  *struct {
 		Address string `xml:"address,attr"`
 	} `xml:"mac"`
-	Target struct {
+	Target *struct {
 		Device string `xml:"dev,attr"`
 	} `xml:"target"`
+	Source  *Source `xml:"source"`
 	Address Address `xml:"address"`
-	Alias   struct {
+	Alias   *struct {
 		Name string `xml:"name,attr"`
 	} `xml:"alias"`
 	Host *graph.Node `xml:"-"`
 }
 
+// HostDev is the XML coding of an host device attached to a domain in libvirt
+type HostDev struct {
+	Managed string `xml:"managed,attr,omitempty"`
+	Mode    string `xml:"mode,attr,omitempty"`
+	Type    string `xml:"type,attr,omitempty"`
+	Driver  *struct {
+		Name string `xml:"name,attr"`
+	} `xml:"driver"`
+	Alias *struct {
+		Name string `xml:"name,attr"`
+	} `xml:"alias"`
+	Source  *Source     `xml:"source"`
+	Address *Address    `xml:"address"`
+	Host    *graph.Node `xml:"-"`
+}
+
 // Domain is the subset of XML coding of a domain in libvirt
 type Domain struct {
-	Interfaces []Interface `xml:"devices>interface"`
+	Interfaces  []Interface `xml:"devices>interface"`
+	HostDevices []HostDev   `xml:"devices>hostdev"`
 }
 
 // getDomainInterfaces uses libvirt to get information on the interfaces of a
 // domain.
 func (probe *Probe) getDomainInterfaces(
-	domain *libvirtgo.Domain, // domain to query
+	domain domain, // domain to query
 	domainNode *graph.Node, // Node representing the domain
 	constraint string, // to restrict the search to a single interface (by alias)
-) (interfaces []*Interface) {
-	rawXML, err := domain.GetXMLDesc(0)
+) (interfaces []*Interface, hostdevs []*HostDev) {
+	rawXML, err := domain.GetXML()
 	if err != nil {
 		logging.GetLogger().Errorf("Cannot get XMLDesc: %s", err)
 		return
 	}
 	d := Domain{}
-	if err = xml.Unmarshal([]byte(rawXML), &d); err != nil {
+	if err = xml.Unmarshal(rawXML, &d); err != nil {
 		logging.GetLogger().Errorf("XML parsing error: %s", err)
 		return
 	}
 	for _, itf := range d.Interfaces {
-		if constraint == "" || constraint == itf.Alias.Name {
+		if constraint == "" || (itf.Alias != nil && constraint == itf.Alias.Name) {
 			itf.Host = domainNode
 			itfObj := itf
 			interfaces = append(interfaces, &itfObj)
 		}
+	}
+	for _, hostdev := range d.HostDevices {
+		logging.GetLogger().Debugf("Found Hostdev %v", hostdev)
+		if hostdev.Mode != "subsystem" || hostdev.Type != "pci" {
+			continue
+		}
+		if hostdev.Source == nil || hostdev.Source.Address == nil {
+			continue
+		}
+		hostdev.Host = domainNode
+		hostdevs = append(hostdevs, &hostdev)
+	}
+	return
+}
+
+func (probe *Probe) makeHostDev(name string, source *Source) (node *graph.Node, err error) {
+	if source == nil || source.Address == nil {
+		err = errors.New("hostdev without PCI address")
+		return
+	}
+	address := formatPciAddress(source.Address)
+	node = probe.graph.LookupFirstChild(probe.root, graph.Metadata{
+		"BusInfo": address,
+	})
+	if node == nil {
+		m := graph.Metadata{
+			"Name":    fmt.Sprintf("%s-%s", name, strings.TrimPrefix(address, "0000:")),
+			"BusInfo": address,
+			"Driver":  "pci-passthrough",
+			"Type":    "device",
+		}
+		node, err = probe.graph.NewNode(graph.GenID(), m)
+		if err != nil {
+			return
+		}
+		_, err = topology.AddOwnershipLink(probe.graph, probe.root, node, nil)
 	}
 	return
 }
 
 // registerInterfaces puts the information collected in the graph
 // interfaces is an array of collected information.
-func (probe *Probe) registerInterfaces(interfaces []*Interface) {
+func (probe *Probe) registerInterfaces(interfaces []*Interface, hostdevs []*HostDev) {
 	probe.graph.Lock()
 	defer probe.graph.Unlock()
-	for _, itf := range interfaces {
-		name := itf.Target.Device
-		if name == "" {
+	for i, itf := range interfaces {
+		if itf.Type == "hostdev" && itf.Source != nil {
+			node, err := probe.makeHostDev("itf", itf.Source)
+			if err != nil {
+				logging.GetLogger().Errorf("Cannot get hostdev interface: %s", err)
+				continue
+			}
+			logging.GetLogger().Debugf(
+				"Libvirt hostdev interface %d on %s", i, itf.Host.Metadata["Name"])
+			itf.ProcessNode(probe.graph, node)
+		} else {
+			var target string
+			if itf.Target != nil {
+				target = itf.Target.Device
+			}
+			if target == "" {
+				continue
+			}
+			logging.GetLogger().Debugf(
+				"Libvirt interface %s on %s", target, itf.Host.Metadata["Name"])
+			probe.tunProcessor.DoAction(itf, target)
+		}
+	}
+
+	for i, hdev := range hostdevs {
+		node, err := probe.makeHostDev("hdev", hdev.Source)
+		if err != nil {
+			logging.GetLogger().Errorf("Cannot get hostdev: %s", err)
 			continue
 		}
 		logging.GetLogger().Debugf(
-			"Libvirt interface %s on %s", name, itf.Host)
-		probe.tunProcessor.DoAction(itf, name)
+			"hostdev interface %d on %s", i, hdev.Host.Metadata["Name"])
+		enrichHostDev(hdev, probe.graph, node)
 	}
+}
+
+func formatPciAddress(address *Address) string {
+	return fmt.Sprintf(
+		"%s:%s:%s.%s",
+		strings.TrimPrefix(address.Domain, "0x"),
+		strings.TrimPrefix(address.Bus, "0x"),
+		strings.TrimPrefix(address.Slot, "0x"),
+		strings.TrimPrefix(address.Function, "0x"))
 }
 
 // ProcessNode adds the libvirt interface information to a node of the graph
 func (itf *Interface) ProcessNode(g *graph.Graph, node *graph.Node) bool {
-	logging.GetLogger().Debugf("enrich %s", itf.Alias.Name)
+	var alias string
+	if itf.Alias != nil {
+		alias = itf.Alias.Name
+	}
+	logging.GetLogger().Debugf("enrich %s", alias)
 	tr := g.StartMetadataTransaction(node)
-	tr.AddMetadata("Libvirt.MAC", itf.Mac.Address)
-	tr.AddMetadata("Libvirt.Domain", itf.Host)
+	if itf.Mac != nil {
+		tr.AddMetadata("Libvirt.MAC", itf.Mac.Address)
+		tr.AddMetadata("PeerIntfMAC", itf.Mac.Address)
+	}
+	tr.AddMetadata("Libvirt.Domain", itf.Host.Metadata["Name"])
 	address := itf.Address
-	formatted := fmt.Sprintf(
-		"%s:%s.%s.%s.%s", address.Type, address.Domain, address.Bus,
-		address.Slot, address.Function)
-	tr.AddMetadata("Libvirt.Address", formatted)
-	tr.AddMetadata("Libvirt.Alias", itf.Alias.Name)
-	tr.AddMetadata("PeerIntfMAC", itf.Mac.Address)
-	tr.Commit()
+	formatted := formatPciAddress(&address)
+	tr.AddMetadata("Libvirt.BusType", address.Type)
+	tr.AddMetadata("Libvirt.BusInfo", formatted)
+	tr.AddMetadata("Libvirt.Alias", alias)
+	if err := tr.Commit(); err != nil {
+		logging.GetLogger().Errorf("Metadata transaction failed: %s", err)
+	}
 	if !topology.HaveLink(g, node, itf.Host, "vlayer2") {
 		if _, err := topology.AddLink(g, node, itf.Host, "vlayer2", nil); err != nil {
 			logging.GetLogger().Error(err)
@@ -153,9 +270,36 @@ func (itf *Interface) ProcessNode(g *graph.Graph, node *graph.Node) bool {
 	return false
 }
 
+// enrichHostDev adds the hostdev information to the coresponding virtual function
+// of an sr-iov interface
+func enrichHostDev(hostdev *HostDev, g *graph.Graph, node *graph.Node) {
+	tr := g.StartMetadataTransaction(node)
+	tr.AddMetadata("Libvirt.Domain", hostdev.Host.Metadata["Name"])
+	address := hostdev.Address
+	formatted := formatPciAddress(address)
+	tr.AddMetadata("Libvirt.BusType", address.Type)
+	tr.AddMetadata("Libvirt.BusInfo", formatted)
+	if hostdev.Alias != nil {
+		tr.AddMetadata("Libvirt.Alias", hostdev.Alias.Name)
+	}
+	if err := tr.Commit(); err != nil {
+		logging.GetLogger().Errorf("Metadata transaction failed: %s", err)
+	}
+	if !topology.HaveLink(g, node, hostdev.Host, "vlayer2") {
+		if _, err := topology.AddLink(g, node, hostdev.Host, "vlayer2", nil); err != nil {
+			logging.GetLogger().Error(err)
+		}
+	}
+}
+
 // getDomain access the graph node representing a libvirt domain
-func (probe *Probe) getDomain(d *libvirtgo.Domain) *graph.Node {
-	domainName, _ := d.GetName()
+func (probe *Probe) getDomain(d domain) *graph.Node {
+	domainName, err := d.GetName()
+	if err != nil {
+		logging.GetLogger().Error(err)
+		return nil
+	}
+
 	probe.graph.RLock()
 	defer probe.graph.RUnlock()
 	return probe.graph.LookupFirstNode(graph.Metadata{"Name": domainName, "Type": "libvirt"})
@@ -163,17 +307,20 @@ func (probe *Probe) getDomain(d *libvirtgo.Domain) *graph.Node {
 
 // createOrUpdateDomain creates a new graph node representing a libvirt domain
 // if necessary and updates its state.
-func (probe *Probe) createOrUpdateDomain(d *libvirtgo.Domain) *graph.Node {
+func (probe *Probe) createOrUpdateDomain(d domain) *graph.Node {
 	g := probe.graph
 	g.Lock()
 	defer g.Unlock()
-	domainName, _ := d.GetName()
+	domainName, err := d.GetName()
+	if err != nil {
+		logging.GetLogger().Error(err)
+		return nil
+	}
 	metadata := graph.Metadata{
 		"Name": domainName,
 		"Type": "libvirt",
 	}
 
-	var err error
 	domainNode := g.LookupFirstNode(metadata)
 	if domainNode == nil {
 		domainNode, err = g.NewNode(graph.GenID(), metadata)
@@ -182,7 +329,7 @@ func (probe *Probe) createOrUpdateDomain(d *libvirtgo.Domain) *graph.Node {
 			return nil
 		}
 
-		if _, err = topology.AddOwnershipLink(g, probe.root, domainNode, graph.Metadata{"RelationType": "ownership"}); err != nil {
+		if _, err = topology.AddOwnershipLink(g, probe.root, domainNode, nil); err != nil {
 			logging.GetLogger().Error(err)
 			return nil
 		}
@@ -194,14 +341,16 @@ func (probe *Probe) createOrUpdateDomain(d *libvirtgo.Domain) *graph.Node {
 	} else {
 		tr := g.StartMetadataTransaction(domainNode)
 		tr.AddMetadata("State", DomainStateMap[state])
-		tr.Commit()
+		if err = tr.Commit(); err != nil {
+			logging.GetLogger().Errorf("Metadata transaction failed: %s", err)
+		}
 	}
 
 	return domainNode
 }
 
 // deleteDomain deletes the graph node representing a libvirt domain
-func (probe *Probe) deleteDomain(d *libvirtgo.Domain) {
+func (probe *Probe) deleteDomain(d domain) {
 	domainNode := probe.getDomain(d)
 	if domainNode != nil {
 		probe.graph.Lock()
@@ -214,83 +363,36 @@ func (probe *Probe) deleteDomain(d *libvirtgo.Domain) {
 
 // Start get all domains attached to a libvirt connection
 func (probe *Probe) Start() {
-	// The event loop must be registered WITH its poll loop active BEFORE the
-	// connection is opened. Otherwise it just does not work.
-	if err := libvirtgo.EventRegisterDefaultImpl(); err != nil {
-		logging.GetLogger().Errorf("libvirt event handler:  %s", err)
-	}
 	ctx, cancel := context.WithCancel(context.Background())
 	probe.cancel = cancel
-	go func() {
-		for ctx.Err() == nil {
-			if err := libvirtgo.EventRunDefaultImpl(); err != nil {
-				logging.GetLogger().Errorf("libvirt poll loop problem: %s", err)
-			}
-		}
-	}()
-	conn, err := libvirtgo.NewConnectReadOnly(probe.uri)
-	if err != nil {
-		logging.GetLogger().Errorf("Failed to create libvirt connect")
-		return
-	}
-	probe.conn = conn
-	callback := func(
-		c *libvirtgo.Connect, d *libvirtgo.Domain,
-		event *libvirtgo.DomainEventLifecycle,
-	) {
-		switch event.Event {
-		case libvirtgo.DOMAIN_EVENT_UNDEFINED:
-			probe.deleteDomain(d)
-		case libvirtgo.DOMAIN_EVENT_STARTED:
-			domainNode := probe.createOrUpdateDomain(d)
-			interfaces := probe.getDomainInterfaces(d, domainNode, "")
-			probe.registerInterfaces(interfaces)
-		case libvirtgo.DOMAIN_EVENT_DEFINED, libvirtgo.DOMAIN_EVENT_SUSPENDED,
-			libvirtgo.DOMAIN_EVENT_RESUMED, libvirtgo.DOMAIN_EVENT_STOPPED,
-			libvirtgo.DOMAIN_EVENT_SHUTDOWN, libvirtgo.DOMAIN_EVENT_PMSUSPENDED,
-			libvirtgo.DOMAIN_EVENT_CRASHED:
-			probe.createOrUpdateDomain(d)
-		}
-	}
-	probe.cidLifecycle, err = conn.DomainEventLifecycleRegister(nil, callback)
-	if err != nil {
-		logging.GetLogger().Errorf(
-			"Could not register the lifecycle event handler %s", err)
-	}
-	callbackDeviceAdded := func(
-		c *libvirtgo.Connect, d *libvirtgo.Domain,
-		event *libvirtgo.DomainEventDeviceAdded,
-	) {
-		domainNode := probe.getDomain(d)
-		interfaces := probe.getDomainInterfaces(d, domainNode, event.DevAlias)
-		probe.registerInterfaces(interfaces) // 0 or 1 device changed.
-	}
-	probe.cidDevAdded, err = conn.DomainEventDeviceAddedRegister(nil, callbackDeviceAdded)
-	if err != nil {
-		logging.GetLogger().Errorf(
-			"Could not register the device added event handler %s", err)
-	}
-	domains, err := probe.conn.ListAllDomains(0)
+
+	conn, err := newMonitor(ctx, probe)
 	if err != nil {
 		logging.GetLogger().Error(err)
 		return
 	}
+	probe.conn = conn
+
+	domains, err := probe.conn.AllDomains()
+	if err != nil {
+		logging.GetLogger().Error(err)
+		return
+	}
+
 	for _, domain := range domains {
-		domainNode := probe.createOrUpdateDomain(&domain)
-		interfaces := probe.getDomainInterfaces(&domain, domainNode, "")
-		probe.registerInterfaces(interfaces)
+		domainNode := probe.createOrUpdateDomain(domain)
+		interfaces, hostdevs := probe.getDomainInterfaces(domain, domainNode, "")
+		probe.registerInterfaces(interfaces, hostdevs)
 	}
 }
 
 // Stop stops the probe
 func (probe *Probe) Stop() {
+	if probe.conn != nil {
+		probe.conn.Stop()
+	}
 	probe.cancel()
 	probe.tunProcessor.Stop()
-	if probe.cidLifecycle != -1 {
-		probe.conn.DomainEventDeregister(probe.cidLifecycle)
-		probe.conn.DomainEventDeregister(probe.cidDevAdded)
-	}
-	probe.conn.Close()
 }
 
 // NewProbe creates a libvirt topology probe
@@ -299,7 +401,6 @@ func NewProbe(g *graph.Graph, uri string, root *graph.Node) *Probe {
 	probe := &Probe{
 		graph:        g,
 		interfaceMap: make(map[string]*Interface),
-		cidLifecycle: -1,
 		uri:          uri,
 		root:         root,
 		tunProcessor: tunProcessor,

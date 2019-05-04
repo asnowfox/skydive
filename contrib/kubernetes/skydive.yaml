@@ -1,4 +1,22 @@
 apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: skydive-service-account
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: skydive-default-view
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: view
+subjects:
+  - kind: ServiceAccount
+    name: skydive-service-account
+    namespace: default
+---
+apiVersion: v1
 kind: Service
 metadata:
   name: skydive-analyzer
@@ -55,18 +73,35 @@ spec:
         app: skydive
         tier: analyzer
     spec:
+      serviceAccountName: skydive-service-account
       containers:
       - name: skydive-analyzer
         image: skydive/skydive
         args:
         - analyzer
         - --listen=0.0.0.0:8082
+        env:
+        - name: SKYDIVE_ANALYZER_TOPOLOGY_PROBES
+          value: k8s
         ports:
         - containerPort: 8082
         - containerPort: 8082
           protocol: UDP
         - containerPort: 12379
         - containerPort: 12380
+        readinessProbe:
+          httpGet:
+            port: 8082
+            path: /api/status
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            port: 8082
+            path: /api/status
+          initialDelaySeconds: 20
+          periodSeconds: 10
+          failureThreshold: 10
         envFrom:
         - configMapRef:
             name: skydive-analyzer-config
@@ -102,6 +137,19 @@ spec:
         - agent
         ports:
         - containerPort: 8081
+        readinessProbe:
+          httpGet:
+            port: 8081
+            path: /api/status
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            port: 8081
+            path: /api/status
+          initialDelaySeconds: 20
+          periodSeconds: 10
+          failureThreshold: 10
         env:
         - name: SKYDIVE_ANALYZERS
           value: "$(SKYDIVE_ANALYZER_SERVICE_HOST):$(SKYDIVE_ANALYZER_SERVICE_PORT_API)"
@@ -125,6 +173,10 @@ spec:
           mountPath: /var/run/runc-ctrs
         - name: containerd-runc
           mountPath: /var/run/containerd/runc
+        - name: data-kubelet
+          mountPath: /var/data/kubelet
+        - name: lib-kubelet
+          mountPath: /var/lib/kubelet
       volumes:
       - name: docker
         hostPath:
@@ -144,3 +196,9 @@ spec:
       - name: containerd-runc
         hostPath:
           path: /var/run/containerd/runc
+      - name: data-kubelet
+        hostPath:
+          path: /var/data/kubelet
+      - name: lib-kubelet
+        hostPath:
+          path: /var/lib/kubelet

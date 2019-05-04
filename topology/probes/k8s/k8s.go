@@ -22,6 +22,7 @@ import (
 
 	"github.com/skydive-project/skydive/config"
 	"github.com/skydive-project/skydive/graffiti/graph"
+	"github.com/skydive-project/skydive/probe"
 
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -91,6 +92,8 @@ func NewK8sProbe(g *graph.Graph) (*Probe, error) {
 		newDeploymentPodLinker,
 		newDeploymentReplicaSetLinker,
 		newPodContainerLinker,
+		newPodConfigMapLinker,
+		newPodSecretLinker,
 		newHostNodeLinker,
 		newNodePodLinker,
 		newIngressServiceLinker,
@@ -106,7 +109,9 @@ func NewK8sProbe(g *graph.Graph) (*Probe, error) {
 
 	linkers := InitLinkers(linkerHandlers, g)
 
-	probe := NewProbe(g, Manager, subprobes[Manager], linkers)
+	verifiers := []probe.Probe{}
+
+	probe := NewProbe(g, Manager, subprobes[Manager], linkers, verifiers)
 
 	probe.AppendClusterLinkers(
 		"namespace",

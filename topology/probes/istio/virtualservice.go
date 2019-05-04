@@ -48,41 +48,49 @@ func newVirtualServiceProbe(client interface{}, g *graph.Graph) k8s.Subprobe {
 	return k8s.NewResourceCache(client.(*kiali.IstioClient).GetIstioNetworkingApi(), &kiali.VirtualService{}, "virtualservices", g, &virtualServiceHandler{})
 }
 
-type virtualServiceSpec struct {
-	HTTP []struct {
-		Route []struct {
-			Destination struct {
-				App     string `mapstructure:"host"`
-				Version string `mapstructure:"subset"`
-			} `mapstructure:"destination"`
-		} `mapstructure:"route"`
-	} `mapstructure:"http"`
+type route struct {
+	Destination struct {
+		App     string `mapstructure:"host"`
+		Version string `mapstructure:"subset"`
+	} `mapstructure:"destination"`
+	Weight int `mapstructure:"weight"`
 }
 
-func (vsSpec virtualServiceSpec) getAppsVersions() map[string][]string {
-	appsVersions := make(map[string][]string)
-	for _, http := range vsSpec.HTTP {
-		for _, route := range http.Route {
+type rule struct {
+	Match  interface{} `mapstructure:"match"`
+	Routes []route     `mapstructure:"route"`
+}
+
+type virtualServiceSpec struct {
+	HTTP []rule `mapstructure:"http"`
+	TLS  []rule `mapstructure:"tls"`
+	TCP  []rule `mapstructure:"tcp"`
+}
+
+type instanceMap map[string][]string
+
+func newInstanceMap() instanceMap {
+	return make(map[string][]string)
+}
+
+func (im instanceMap) addInstancesByRules(rules []rule) {
+	for _, vsRule := range rules {
+		for _, route := range vsRule.Routes {
 			app := route.Destination.App
+			if app == "" {
+				continue
+			}
 			version := route.Destination.Version
-			appsVersions[app] = append(appsVersions[app], version)
+			im[app] = append(im[app], version)
 		}
 	}
-	return appsVersions
 }
 
-func virtualServicePodAreLinked(a, b interface{}) bool {
-	vs := a.(*kiali.VirtualService)
-	pod := b.(*v1.Pod)
-	vsSpec := &virtualServiceSpec{}
-	if err := mapstructure.Decode(vs.Spec, vsSpec); err != nil {
-		return false
-	}
-	vsAppsVersions := vsSpec.getAppsVersions()
-	for app, versions := range vsAppsVersions {
-		if app == pod.Labels["app"] {
+func (im instanceMap) has(instanceApp, instanceVersion string) bool {
+	for app, versions := range im {
+		if app == instanceApp {
 			for _, version := range versions {
-				if version == "" || version == pod.Labels["version"] {
+				if version == "" || version == instanceVersion {
 					return true
 				}
 			}
@@ -91,6 +99,144 @@ func virtualServicePodAreLinked(a, b interface{}) bool {
 	return false
 }
 
+func matchRoute(r route, app, version string) bool {
+	if r.Destination.App != app {
+		return false
+	}
+
+	return r.Destination.Version == version || r.Destination.Version == ""
+}
+
+func virtualServicePodMetadata(a, b interface{}, typeA, typeB, manager string) graph.Metadata {
+	vs := a.(*kiali.VirtualService)
+	pod := b.(*v1.Pod)
+	vsSpec := &virtualServiceSpec{}
+	if err := mapstructure.Decode(vs.Spec, vsSpec); err != nil {
+		return nil
+	}
+	m := k8s.NewEdgeMetadata(manager, typeA)
+	if pod.Labels["app"] == "" {
+		return m
+	}
+
+	app, version := pod.Labels["app"], pod.Labels["version"]
+
+	for _, http := range vsSpec.HTTP {
+		if http.Match != nil {
+			// weights calculation - only for the default unconditional rule
+			continue
+		}
+
+		if len(http.Routes) == 1 && matchRoute(http.Routes[0], app, version) {
+			m["Weight"] = 100
+			break
+		}
+
+		for _, route := range http.Routes {
+			if matchRoute(route, app, version) {
+				m["Weight"] = route.Weight
+				break
+			}
+		}
+
+	}
+
+	protocols := []string{}
+
+	if findInstance(vsSpec.HTTP, app, version) {
+		protocols = append(protocols, "HTTP")
+	}
+	if findInstance(vsSpec.TLS, app, version) {
+		protocols = append(protocols, "TLS")
+	}
+	if findInstance(vsSpec.TCP, app, version) {
+		protocols = append(protocols, "TCP")
+	}
+
+	p := arrayToString(protocols)
+	m.SetField("Protocol", p)
+
+	return m
+}
+
+func arrayToString(arr []string) string {
+	s := arr[0]
+	for _, elem := range arr[1:] {
+		s = s + ", " + elem
+	}
+	return s
+}
+
+func findInstance(r []rule, app, version string) bool {
+	instances := newInstanceMap()
+	instances.addInstancesByRules(r)
+	return instances.has(app, version)
+}
+
+func virtualServicePodAreLinked(a, b interface{}) bool {
+	vs := a.(*kiali.VirtualService)
+	pod := b.(*v1.Pod)
+
+	if !k8s.MatchNamespace(vs, pod) {
+		return false
+	}
+
+	app, version := pod.Labels["app"], pod.Labels["version"]
+
+	vsSpec := &virtualServiceSpec{}
+	if err := mapstructure.Decode(vs.Spec, vsSpec); err != nil {
+		return false
+	}
+
+	return findInstance(vsSpec.HTTP, app, version) || findInstance(vsSpec.TLS, app, version) || findInstance(vsSpec.TCP, app, version)
+}
+
+func findMissingGateways(g *graph.Graph) {
+	cache := k8s.GetSubprobe(Manager, "virtualservice")
+	if cache == nil {
+		return
+	}
+	vsCache := cache.(*k8s.ResourceCache)
+	vsList := vsCache.List()
+	for _, vs := range vsList {
+		vs := vs.(*kiali.VirtualService)
+		if vsNode := g.GetNode(graph.Identifier(vs.GetUID())); vsNode != nil {
+			k8s.SetState(&vsNode.Metadata, true)
+			if vs.Spec["gateways"] != nil {
+				vsGateways := vs.Spec["gateways"].([]interface{})
+				for _, vsGateway := range vsGateways {
+					if isGatewayMissing(vsGateway.(string)) {
+						k8s.SetState(&vsNode.Metadata, false)
+					}
+				}
+			}
+		}
+	}
+}
+
+func isGatewayMissing(name string) bool {
+	cache := k8s.GetSubprobe(Manager, "gateway")
+	if cache == nil {
+		return true
+	}
+	gatewayCache := cache.(*k8s.ResourceCache)
+	gatewaysList := gatewayCache.List()
+	for _, gateway := range gatewaysList {
+		gateway := gateway.(*kiali.Gateway)
+		if gateway.Name == name {
+			return false
+		}
+	}
+	return true
+}
+
 func newVirtualServicePodLinker(g *graph.Graph) probe.Probe {
-	return k8s.NewABLinker(g, Manager, "virtualservice", k8s.Manager, "pod", virtualServicePodAreLinked)
+	return k8s.NewABLinker(g, Manager, "virtualservice", k8s.Manager, "pod", virtualServicePodAreLinked, virtualServicePodMetadata)
+}
+
+func newVirtualServiceGatewayVerifier(g *graph.Graph) *resourceVerifier {
+	vsProbe := k8s.GetSubprobe(Manager, "virtualservice")
+	gatewayProbe := k8s.GetSubprobe(Manager, "gateway")
+	handlers := []graph.ListenerHandler{vsProbe, gatewayProbe}
+	return newResourceVerifier(g, handlers, findMissingGateways)
 }
