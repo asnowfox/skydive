@@ -110,7 +110,11 @@ func (mapper *Probe) retrievePort(portMd portMetadata) (port ports.Port, err err
 	if portMd.portID != "" {
 		opts.ID = portMd.portID
 	} else {
-		opts.MACAddress = portMd.mac
+               if strings.HasPrefix(portMd.name,"tap"){
+                       opts.MACAddress = strings.Replace(portMd.mac,"fe","fa",1)
+               }else{
+                       opts.MACAddress = portMd.mac
+               }
 	}
 
 	logging.GetLogger().Debugf("Retrieving attributes from Neutron port with options: %+v", opts)
