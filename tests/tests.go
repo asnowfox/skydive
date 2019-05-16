@@ -156,11 +156,13 @@ type TestContext struct {
 
 // TestCapture describes a capture to be created in tests
 type TestCapture struct {
-	gremlin    g.QueryString
-	kind       string
-	bpf        string
-	rawPackets int
-	port       int
+	gremlin         g.QueryString
+	kind            string
+	bpf             string
+	rawPackets      int
+	port            int
+	samplingRate    uint32 // default-value : 1
+	pollingInterval uint32 // default-value : 10
 }
 
 // TestInjection describes a packet injection to be created in tests
@@ -454,6 +456,8 @@ func RunTest(t *testing.T, test *Test) {
 		capture.Type = tc.kind
 		capture.RawPacketLimit = tc.rawPackets
 		capture.Port = tc.port
+		capture.SamplingRate = tc.samplingRate
+		capture.PollingInterval = tc.pollingInterval
 		if err = client.Create("capture", capture); err != nil {
 			t.Fatal(err)
 		}
@@ -598,6 +602,13 @@ func RunTest(t *testing.T, test *Test) {
 		context.postmortem(t, test, time.Time{})
 		t.Fatalf("Failed to setup test: %s", err)
 	}
+
+	defer func() {
+		t.Log("Removing existing injections")
+		for _, injection := range context.injections {
+			client.Delete("injectpacket", injection.ID())
+		}
+	}()
 
 	for _, injection := range test.injections {
 		ipVersion := 4
