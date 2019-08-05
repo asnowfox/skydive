@@ -59,7 +59,7 @@ func DefToMetadata(def string, metadata graph.Metadata) (graph.Metadata, error) 
 		key := strings.Trim(kv[0], `"`)
 		value := strings.Trim(kv[1], `"`)
 
-		common.SetField(metadata, key, value)
+		metadata.SetField(key, value)
 	}
 
 	return metadata, nil
@@ -134,7 +134,7 @@ func (tm *TopologyManager) nodeID(node *types.NodeRule) graph.Identifier {
 
 func (tm *TopologyManager) createNode(node *types.NodeRule) error {
 	id := tm.nodeID(node)
-	common.SetField(node.Metadata, "TID", string(id))
+	node.Metadata.SetField("TID", string(id))
 
 	//check node already exist
 	if n := tm.graph.GetNode(id); n != nil {
@@ -142,7 +142,7 @@ func (tm *TopologyManager) createNode(node *types.NodeRule) error {
 	}
 
 	if node.Metadata["Type"] == "fabric" {
-		common.SetField(node.Metadata, "Probe", "fabric")
+		node.Metadata["Probe"] = "fabric"
 	}
 
 	tm.graph.NewNode(id, node.Metadata, "")
@@ -254,15 +254,12 @@ func (tm *TopologyManager) onAPIWatcherEvent(action string, id string, resource 
 	switch resource.(type) {
 	case *types.NodeRule:
 		tm.graph.Lock()
-		if err := tm.handleNodeRuleRequest(action, resource); err != nil {
-			tm.nodeHandler.BasicAPIHandler.Delete(id)
-		}
+		tm.handleNodeRuleRequest(action, resource)
 		tm.graph.Unlock()
 	case *types.EdgeRule:
+		logging.GetLogger().Debugf("onAPIWatcherEvent edgerule")
 		tm.graph.Lock()
-		if err := tm.handleEdgeRuleRequest(action, resource); err != nil {
-			tm.edgeHandler.BasicAPIHandler.Delete(id)
-		}
+		tm.handleEdgeRuleRequest(action, resource)
 		tm.graph.Unlock()
 	}
 }

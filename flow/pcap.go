@@ -18,10 +18,8 @@
 package flow
 
 import (
-	"errors"
 	"io"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/google/gopacket"
@@ -40,7 +38,7 @@ type PcapWriter struct {
 // PcapTableFeeder replaies a pcap file
 type PcapTableFeeder struct {
 	sync.WaitGroup
-	state       int64
+	state       common.ServiceState
 	replay      bool
 	r           io.ReadCloser
 	handleRead  *pcapgo.Reader
@@ -50,7 +48,7 @@ type PcapTableFeeder struct {
 
 // Start a pcap injector
 func (p *PcapTableFeeder) Start() {
-	if atomic.CompareAndSwapInt64(&p.state, common.StoppedState, common.RunningState) {
+	if p.state.CompareAndSwap(common.StoppedState, common.RunningState) {
 		p.Add(1)
 		go p.feedFlowTable()
 	}
@@ -58,11 +56,11 @@ func (p *PcapTableFeeder) Start() {
 
 // Stop a pcap injector
 func (p *PcapTableFeeder) Stop() {
-	if atomic.CompareAndSwapInt64(&p.state, common.RunningState, common.StoppingState) {
-		atomic.StoreInt64(&p.state, common.StoppingState)
+	if p.state.CompareAndSwap(common.RunningState, common.StoppingState) {
+		p.state.Store(common.StoppingState)
 		p.r.Close()
 		p.Wait()
-		atomic.StoreInt64(&p.state, common.StoppedState)
+		p.state.Store(common.StoppedState)
 	}
 }
 
@@ -82,12 +80,12 @@ func (p *PcapTableFeeder) feedFlowTable() {
 		logging.GetLogger().Error(err.Error())
 	}
 
-	atomic.StoreInt64(&p.state, common.RunningState)
-	for atomic.LoadInt64(&p.state) == common.RunningState {
+	p.state.Store(common.RunningState)
+	for p.state.Load() == common.RunningState {
 		logging.GetLogger().Debugf("Reading one pcap packet")
 		data, ci, err := p.handleRead.ReadPacketData()
 		if err != nil {
-			if atomic.LoadInt64(&p.state) == common.RunningState && err != io.EOF {
+			if p.state.Load() == common.RunningState && err != io.EOF {
 				logging.GetLogger().Warningf("Failed to read packet: %s\n", err)
 			}
 			p.r.Close()
@@ -155,12 +153,13 @@ func (p *PcapWriter) WriteRawPacket(r *RawPacket) error {
 
 // WriteRawPackets writes a RawPackets iterating over the RawPackets and using
 // WriteRawPacket for each.
-func (p *PcapWriter) WriteRawPackets(fr *RawPackets) error {
-	if fr.LinkType != layers.LinkTypeEthernet {
-		return errors.New("Support only Ethernet link type for the moment")
-	}
+func (p *PcapWriter) WriteRawPackets(fr []*RawPacket) error {
 
-	for _, r := range fr.RawPackets {
+	for _, r := range fr {
+		if r.LinkType != layers.LinkTypeEthernet {
+			logging.GetLogger().Errorf("Support only Ethernet link type for the moment")
+			continue
+		}
 		if err := p.WriteRawPacket(r); err != nil {
 			return err
 		}

@@ -30,7 +30,6 @@ import (
 	"github.com/skydive-project/skydive/graffiti/graph"
 	g "github.com/skydive-project/skydive/gremlin"
 	"github.com/skydive-project/skydive/topology"
-	"github.com/skydive-project/skydive/topology/probes/netlink"
 )
 
 func TestBridgeOVS(t *testing.T) {
@@ -610,7 +609,7 @@ func TestNodeRuleCreate(t *testing.T) {
 
 	test := &Test{
 		setupFunction: func(c *TestContext) error {
-			return c.client.Create("noderule", nodeRule)
+			return c.client.Create("noderule", nodeRule, nil)
 		},
 
 		tearDownFunction: func(c *TestContext) error {
@@ -657,7 +656,7 @@ func TestNodeRuleUpdate(t *testing.T) {
 		},
 
 		setupFunction: func(c *TestContext) error {
-			return c.client.Create("noderule", nodeRule)
+			return c.client.Create("noderule", nodeRule, nil)
 		},
 
 		tearDownFunction: func(c *TestContext) error {
@@ -710,7 +709,7 @@ func TestEdgeRuleCreate(t *testing.T) {
 		},
 
 		setupFunction: func(c *TestContext) error {
-			return c.client.Create("edgerule", edgeRule)
+			return c.client.Create("edgerule", edgeRule, nil)
 		},
 
 		tearDownFunction: func(c *TestContext) error {
@@ -728,8 +727,8 @@ func TestEdgeRuleCreate(t *testing.T) {
 		checks: []CheckFunction{
 			func(c *CheckContext) error {
 				query := c.gremlin.V().Has("Name", "br-srcnode", "Type", "ovsbridge")
-				query = query.BothE().Has("RelationType", "layer2")
-				query = query.BothV().Has("Name", "br-dstnode", "Type", "ovsbridge")
+				query = query.OutE().Has("RelationType", "layer2")
+				query = query.OutV().Has("Name", "br-dstnode", "Type", "ovsbridge")
 				if _, err := c.gh.GetNode(query); err != nil {
 					return fmt.Errorf("Failed to find a layer2 link, error: %v", err)
 				}
@@ -739,10 +738,12 @@ func TestEdgeRuleCreate(t *testing.T) {
 
 			func(c *CheckContext) error {
 				query := c.gremlin.V().Has("Name", "br-srcnode", "Type", "ovsbridge")
-				query = query.BothE().Has("RelationType", "layer2")
-				query = query.BothV().Has("Name", "br-dstnode", "Type", "ovsbridge")
+				query = query.OutE().Has("RelationType", "layer2")
+				query = query.OutV().Has("Name", "br-dstnode", "Type", "ovsbridge")
 
-				c.client.Delete("edgerule", edgeRule.ID())
+				if c.successTime.IsZero() {
+					c.client.Delete("edgerule", edgeRule.ID())
+				}
 
 				if _, err := c.gh.GetNode(query); err != common.ErrNotFound {
 					return errors.New("Found a layer2 link")
@@ -822,7 +823,7 @@ func TestRouteTable(t *testing.T) {
 					return fmt.Errorf("Failed to find a node with IP 124.65.91.42/24")
 				}
 
-				routingTables, ok := node.Metadata["RoutingTables"].(*netlink.RoutingTables)
+				routingTables, ok := node.Metadata["RoutingTables"].(*topology.RoutingTables)
 				if !ok {
 					return fmt.Errorf("Wrong metadata type for RoutingTables: %+v", node.Metadata["RoutingTables"])
 				}
@@ -838,7 +839,7 @@ func TestRouteTable(t *testing.T) {
 					return fmt.Errorf("Failed to find a node with IP 124.65.91.42/24")
 				}
 
-				routingTables, ok = node.Metadata["RoutingTables"].(*netlink.RoutingTables)
+				routingTables, ok = node.Metadata["RoutingTables"].(*topology.RoutingTables)
 				if !ok {
 					return fmt.Errorf("Wrong metadata type for RoutingTables: %+v", node.Metadata["RoutingTables"])
 				}
@@ -897,7 +898,7 @@ func TestRouteTableHistory(t *testing.T) {
 					return fmt.Errorf("Failed to find a node with IP 124.65.75.42/24")
 				}
 
-				routingTables, ok := node.Metadata["RoutingTables"].(*netlink.RoutingTables)
+				routingTables, ok := node.Metadata["RoutingTables"].(*topology.RoutingTables)
 				if !ok {
 					return fmt.Errorf("Wrong metadata type for RoutingTables: %+v", reflect.TypeOf(node.Metadata["RoutingTables"]))
 				}
@@ -912,6 +913,59 @@ func TestRouteTableHistory(t *testing.T) {
 				if !foundNewTable {
 					return fmt.Errorf("Failed to get added Route from history")
 				}
+				return nil
+			},
+		},
+	}
+	RunTest(t, test)
+}
+
+//TestRouteTable tests route table update
+func TestNeighbors(t *testing.T) {
+	test := &Test{
+		setupCmds: []Cmd{
+			{"ip netns add nb-vm1", true},
+			{"ip link add nb-vm1-eth0 type veth peer name eth0 netns nb-vm1", true},
+			{"ip link set nb-vm1-eth0 up", true},
+			{"ip netns exec nb-vm1 ip link set eth0 up", true},
+			{"ip netns exec nb-vm1 ip addr add 192.168.33.33/24 dev eth0", true},
+			{"sleep 10", true},
+			{"sudo ip netns exec nb-vm1 ip neighbour add 192.168.33.252 dev eth0 lladdr a6:d1:a0:51:03:49", true},
+		},
+
+		tearDownCmds: []Cmd{
+			{"ip link del nb-vm1-eth0", true},
+			{"ip netns del nb-vm1", true},
+		},
+
+		mode: OneShot,
+
+		checks: []CheckFunction{
+			func(c *CheckContext) error {
+				prefix := c.gremlin
+
+				node, err := c.gh.GetNode(prefix.V().Has("IPV4", "192.168.33.33/24"))
+				if err != nil {
+					return fmt.Errorf("Failed to find a node with IP 192.168.33.33/24")
+				}
+
+				neighbors, ok := node.Metadata["Neighbors"].(*topology.Neighbors)
+				if !ok {
+					return fmt.Errorf("Wrong metadata type for Neighbors: %+v", node.Metadata["Neighbors"])
+				}
+
+				var found bool
+				for _, nb := range *neighbors {
+					if nb.MAC == "a6:d1:a0:51:03:49" {
+						found = true
+						break
+					}
+				}
+
+				if !found {
+					return errors.New("unable to find neighbor entry with MAC: a6:d1:a0:51:03:49")
+				}
+
 				return nil
 			},
 		},

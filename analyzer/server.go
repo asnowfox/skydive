@@ -32,21 +32,32 @@ import (
 	"github.com/skydive-project/skydive/etcd"
 	"github.com/skydive-project/skydive/flow"
 	ondemand "github.com/skydive-project/skydive/flow/ondemand/client"
+	"github.com/skydive-project/skydive/flow/probes"
+	"github.com/skydive-project/skydive/flow/server"
 	"github.com/skydive-project/skydive/flow/storage"
 	"github.com/skydive-project/skydive/graffiti/graph"
 	"github.com/skydive-project/skydive/graffiti/graph/traversal"
 	"github.com/skydive-project/skydive/graffiti/hub"
-	"github.com/skydive-project/skydive/graffiti/pod"
 	ge "github.com/skydive-project/skydive/gremlin/traversal"
 	shttp "github.com/skydive-project/skydive/http"
 	"github.com/skydive-project/skydive/logging"
+	"github.com/skydive-project/skydive/ondemand/client"
 	"github.com/skydive-project/skydive/packetinjector"
 	"github.com/skydive-project/skydive/probe"
 	"github.com/skydive-project/skydive/sflow"
 	"github.com/skydive-project/skydive/topology"
 	usertopology "github.com/skydive-project/skydive/topology/enhancers"
+	"github.com/skydive-project/skydive/topology/probes/docker"
+	"github.com/skydive-project/skydive/topology/probes/libvirt"
+	"github.com/skydive-project/skydive/topology/probes/lldp"
+	"github.com/skydive-project/skydive/topology/probes/lxd"
 	"github.com/skydive-project/skydive/topology/probes/netlink"
+	"github.com/skydive-project/skydive/topology/probes/neutron"
+	"github.com/skydive-project/skydive/topology/probes/nsm"
+	"github.com/skydive-project/skydive/topology/probes/opencontrail"
+	"github.com/skydive-project/skydive/topology/probes/ovn"
 	"github.com/skydive-project/skydive/topology/probes/ovsdb"
+	"github.com/skydive-project/skydive/topology/probes/runc"
 	"github.com/skydive-project/skydive/ui"
 	"github.com/skydive-project/skydive/websocket"
 	ws "github.com/skydive-project/skydive/websocket"
@@ -57,7 +68,11 @@ type ElectionStatus struct {
 	IsMaster bool
 }
 
+// Status analyzer object
+//
 // Status describes the status of an analyzer
+//
+// swagger:model AnalyzerStatus
 type Status struct {
 	Agents      map[string]ws.ConnStatus
 	Peers       hub.PeersStatus
@@ -65,7 +80,7 @@ type Status struct {
 	Subscribers map[string]ws.ConnStatus
 	Alerts      ElectionStatus
 	Captures    ElectionStatus
-	Probes      []string
+	Probes      map[string]interface{}
 }
 
 // Server describes an Analyzer servers mechanism like http, websocket, topology, ondemand probes, ...
@@ -74,10 +89,10 @@ type Server struct {
 	uiServer        *ui.Server
 	hub             *hub.Hub
 	alertServer     *alert.Server
-	onDemandClient  *ondemand.OnDemandProbeClient
-	piClient        *packetinjector.Client
+	onDemandClient  *client.OnDemandClient
+	piClient        *client.OnDemandClient
 	topologyManager *usertopology.TopologyManager
-	flowServer      *FlowServer
+	flowServer      *server.FlowServer
 	probeBundle     *probe.Bundle
 	storage         storage.Storage
 	embeddedEtcd    *etcd.EmbeddedEtcd
@@ -96,7 +111,7 @@ func (s *Server) GetStatus() interface{} {
 		Subscribers: hubStatus.Subscribers,
 		Alerts:      ElectionStatus{IsMaster: s.alertServer.IsMaster()},
 		Captures:    ElectionStatus{IsMaster: s.onDemandClient.IsMaster()},
-		Probes:      s.probeBundle.ActiveProbes(),
+		Probes:      s.probeBundle.GetStatus(),
 	}
 }
 
@@ -111,7 +126,7 @@ func (s *Server) createStartupCapture(ch *api.CaptureAPIHandler) error {
 	logging.GetLogger().Infof("Invoke capturing from the startup with gremlin: %s and BPF: %s", gremlin, bpf)
 	capture := types.NewCapture(gremlin, bpf)
 	capture.Type = "pcap"
-	return ch.Create(capture)
+	return ch.Create(capture, nil)
 }
 
 // Start the analyzer server
@@ -258,11 +273,19 @@ func NewServerFromConfig() (*Server, error) {
 		return nil, fmt.Errorf("Unable to get the analyzers list: %s", err)
 	}
 
-	opts := websocket.ServerOpts{
-		WriteCompression: true,
-		QueueSize:        10000,
-		PingDelay:        2 * time.Second,
-		PongTimeout:      5 * time.Second,
+	validator, err := topology.NewSchemaValidator()
+	if err != nil {
+		return nil, fmt.Errorf("Unable to instantiate a schema validator: %s", err)
+	}
+
+	opts := hub.Opts{
+		ServerOpts: websocket.ServerOpts{
+			WriteCompression: true,
+			QueueSize:        10000,
+			PingDelay:        2 * time.Second,
+			PongTimeout:      5 * time.Second,
+		},
+		Validator: validator,
 	}
 
 	clusterAuthOptions := ClusterAuthenticationOpts()
@@ -287,9 +310,6 @@ func NewServerFromConfig() (*Server, error) {
 	tr.AddTraversalExtension(ge.NewDescendantsTraversalExtension())
 	tr.AddTraversalExtension(ge.NewNextHopTraversalExtension())
 
-	subscriberWSServer := ws.NewStructServer(config.NewWSServer(hserver, "/ws/subscriber", apiAuthBackend))
-	pod.NewTopologySubscriberEndpoint(subscriberWSServer, g, tr)
-
 	probeBundle, err := NewTopologyProbeBundleFromConfig(g)
 	if err != nil {
 		return nil, err
@@ -297,7 +317,7 @@ func NewServerFromConfig() (*Server, error) {
 
 	// new flow subscriber endpoints
 	flowSubscriberWSServer := ws.NewStructServer(config.NewWSServer(hserver, "/ws/subscriber/flow", apiAuthBackend))
-	flowSubscriberEndpoint := NewFlowSubscriberEndpoint(flowSubscriberWSServer)
+	flowSubscriberEndpoint := server.NewFlowSubscriberEndpoint(flowSubscriberWSServer)
 
 	apiServer, err := api.NewAPI(hserver, etcdClient.KeysAPI, service, apiAuthBackend)
 	if err != nil {
@@ -313,7 +333,8 @@ func NewServerFromConfig() (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	piClient := packetinjector.NewClient(hub.PodServer(), etcdClient, piAPIHandler, g)
+
+	piClient := packetinjector.NewOnDemandInjectionClient(g, piAPIHandler, hub.PodServer(), hub.SubscriberServer(), etcdClient)
 
 	nodeAPIHandler, err := api.RegisterNodeRuleAPI(apiServer, g, apiAuthBackend)
 	if err != nil {
@@ -333,9 +354,9 @@ func NewServerFromConfig() (*Server, error) {
 		return nil, err
 	}
 
-	onDemandClient := ondemand.NewOnDemandProbeClient(g, captureAPIHandler, hub.PodServer(), hub.SubscriberServer(), etcdClient)
+	onDemandClient := ondemand.NewOnDemandFlowProbeClient(g, captureAPIHandler, hub.PodServer(), hub.SubscriberServer(), etcdClient)
 
-	flowServer, err := NewFlowServer(hserver, g, storage, flowSubscriberEndpoint, probeBundle, clusterAuthBackend)
+	flowServer, err := server.NewFlowServer(hserver, g, storage, flowSubscriberEndpoint, probeBundle, clusterAuthBackend)
 	if err != nil {
 		return nil, err
 	}
@@ -390,11 +411,24 @@ func init() {
 	// add decoders for specific metadata keys, this aims to keep the same
 	// object type between the agent and the analyzer
 	// Decoder will be used while unmarshal the metadata
-	graph.NodeMetadataDecoders["RoutingTables"] = netlink.RoutingTablesMetadataDecoder
-	graph.NodeMetadataDecoders["FDB"] = netlink.NeighborMetadataDecoder
-	graph.NodeMetadataDecoders["Neighbors"] = netlink.NeighborMetadataDecoder
+	graph.NodeMetadataDecoders["Captures"] = probes.CapturesMetadataDecoder
+	graph.NodeMetadataDecoders["PacketInjections"] = packetinjector.InjectionsMetadataDecoder
+	graph.NodeMetadataDecoders["RoutingTables"] = topology.RoutingTablesMetadataDecoder
+	graph.NodeMetadataDecoders["FDB"] = topology.NeighborMetadataDecoder
+	graph.NodeMetadataDecoders["Neighbors"] = topology.NeighborMetadataDecoder
+	graph.NodeMetadataDecoders["Vfs"] = netlink.VFSMetadataDecoder
 	graph.NodeMetadataDecoders["Metric"] = topology.InterfaceMetricMetadataDecoder
 	graph.NodeMetadataDecoders["LastUpdateMetric"] = topology.InterfaceMetricMetadataDecoder
 	graph.NodeMetadataDecoders["SFlow"] = sflow.SFMetadataDecoder
 	graph.NodeMetadataDecoders["Ovs"] = ovsdb.OvsMetadataDecoder
+	graph.NodeMetadataDecoders["LLDP"] = lldp.MetadataDecoder
+	graph.NodeMetadataDecoders["Docker"] = docker.MetadataDecoder
+	graph.NodeMetadataDecoders["Lxd"] = lxd.MetadataDecoder
+	graph.NodeMetadataDecoders["Runc"] = runc.MetadataDecoder
+	graph.NodeMetadataDecoders["Libvirt"] = libvirt.MetadataDecoder
+	graph.NodeMetadataDecoders["OVN"] = ovn.MetadataDecoder
+	graph.NodeMetadataDecoders["Neutron"] = neutron.MetadataDecoder
+	graph.NodeMetadataDecoders["Contrail"] = opencontrail.MetadataDecoder
+
+	graph.EdgeMetadataDecoders["NSM"] = nsm.MetadataDecoder
 }

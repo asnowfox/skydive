@@ -1,3 +1,5 @@
+//go:generate go run ../scripts/gendecoder.go -filename flow.pb.go
+
 /*
  * Copyright (C) 2016 Red Hat, Inc.
  *
@@ -29,73 +31,6 @@ func (fm *FlowMetric) SetStart(start int64) {
 // SetLast set Last field
 func (fm *FlowMetric) SetLast(last int64) {
 	fm.Last = last
-}
-
-// Copy a flow metric
-func (fm *FlowMetric) Copy() *FlowMetric {
-	return &FlowMetric{
-		ABPackets: fm.ABPackets,
-		ABBytes:   fm.ABBytes,
-		BAPackets: fm.BAPackets,
-		BABytes:   fm.BABytes,
-		Start:     fm.Start,
-		Last:      fm.Last,
-	}
-}
-
-// Copy TCP metric
-func (tm *TCPMetric) Copy() *TCPMetric {
-	return &TCPMetric{
-		ABSynStart:            tm.ABSynStart,
-		BASynStart:            tm.BASynStart,
-		ABSynTTL:              tm.ABSynTTL,
-		BASynTTL:              tm.BASynTTL,
-		ABFinStart:            tm.ABFinStart,
-		BAFinStart:            tm.BAFinStart,
-		ABRstStart:            tm.ABRstStart,
-		BARstStart:            tm.BARstStart,
-		ABSegmentOutOfOrder:   tm.ABSegmentOutOfOrder,
-		ABSegmentSkipped:      tm.ABSegmentSkipped,
-		ABSegmentSkippedBytes: tm.ABSegmentSkippedBytes,
-		ABPackets:             tm.ABPackets,
-		ABBytes:               tm.ABBytes,
-		ABSawStart:            tm.ABSawStart,
-		ABSawEnd:              tm.ABSawEnd,
-		BASegmentOutOfOrder:   tm.BASegmentOutOfOrder,
-		BASegmentSkipped:      tm.BASegmentSkipped,
-		BASegmentSkippedBytes: tm.BASegmentSkippedBytes,
-		BAPackets:             tm.BAPackets,
-		BABytes:               tm.BABytes,
-		BASawStart:            tm.BASawStart,
-		BASawEnd:              tm.BASawEnd,
-	}
-}
-
-// GetFieldInt64 implements Getter and Metrics interface
-func (fm *FlowMetric) GetFieldInt64(field string) (int64, error) {
-	switch field {
-	case "ABPackets":
-		return fm.ABPackets, nil
-	case "ABBytes":
-		return fm.ABBytes, nil
-	case "BAPackets":
-		return fm.BAPackets, nil
-	case "BABytes":
-		return fm.BABytes, nil
-	case "RTT":
-		return fm.RTT, nil
-	}
-	return 0, common.ErrFieldNotFound
-}
-
-// GetFieldString implements Getter interface
-func (fm *FlowMetric) GetFieldString(field string) (string, error) {
-	return "", common.ErrFieldNotFound
-}
-
-// GetField implements Getter interface
-func (fm *FlowMetric) GetField(field string) (interface{}, error) {
-	return fm.GetFieldInt64(field)
 }
 
 // Add sum flow metrics
@@ -164,15 +99,4 @@ func (fm *FlowMetric) Split(cut int64) (common.Metric, common.Metric) {
 	m2.(*FlowMetric).Start = cut
 
 	return m1, m2
-}
-
-// GetFieldKeys implements Getter and Metrics interface
-func (fm *FlowMetric) GetFieldKeys() []string {
-	return metricsFields
-}
-
-var metricsFields []string
-
-func init() {
-	metricsFields = common.StructFieldKeys(FlowMetric{})
 }

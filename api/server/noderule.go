@@ -1,3 +1,6 @@
+//go:generate sh -c "renderizer --name='node rule' --resource=noderule --type=NodeRule --title='Node rule' --article=a swagger_operations.tmpl > noderule_swagger.go"
+//go:generate sh -c "renderizer --name='node rule' --resource=noderule --type=NodeRule --title='Node rule' swagger_definitions.tmpl > noderule_swagger.json"
+
 /*
  * Copyright (C) 2018 Red Hat, Inc.
  *
@@ -42,11 +45,6 @@ func (nrh *NodeRuleResourceHandler) Name() string {
 // New creates a new node rule
 func (nrh *NodeRuleResourceHandler) New() types.Resource {
 	return &types.NodeRule{}
-}
-
-// Create a new node rule
-func (nra *NodeRuleAPI) Create(r types.Resource) error {
-	return nra.BasicAPIHandler.Create(r)
 }
 
 // RegisterNodeRuleAPI register a new node rule api handler

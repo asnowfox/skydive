@@ -27,6 +27,7 @@ import (
 	"io/ioutil"
 	"net/http"
 	"net/url"
+	"time"
 
 	"github.com/skydive-project/skydive/common"
 )
@@ -41,6 +42,11 @@ type RestClient struct {
 // CrudClient describes a REST API client to issue CRUD commands
 type CrudClient struct {
 	*RestClient
+}
+
+// CreateOptions describes the options available when creating a resource
+type CreateOptions struct {
+	TTL time.Duration
 }
 
 func readBody(resp *http.Response) string {
@@ -85,8 +91,12 @@ func (c *RestClient) Request(method, path string, body io.Reader, header http.He
 	if header != nil {
 		req.Header = header
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Add("Accept-Encoding", "gzip")
+	if req.Header.Get("Content-Type") == "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if req.Header.Get("Accept-Encoding") == "" {
+		req.Header.Add("Accept-Encoding", "gzip")
+	}
 
 	resp, err := c.client.Do(req)
 	if err != nil {
@@ -144,26 +154,28 @@ func (c *CrudClient) Get(resource string, id string, value interface{}) error {
 }
 
 // Create does a POST request to create a new resource
-func (c *CrudClient) Create(resource string, value interface{}, res ...interface{}) error {
+func (c *CrudClient) Create(resource string, value interface{}, opts *CreateOptions) error {
 	s, err := json.Marshal(value)
 	if err != nil {
 		return err
 	}
 
+	var header http.Header
+	if opts != nil {
+		header = map[string][]string{"X-Resource-TTL": {opts.TTL.String()}}
+	}
+
 	contentReader := bytes.NewReader(s)
-	resp, err := c.Request("POST", resource, contentReader, nil)
+	resp, err := c.Request("POST", resource, contentReader, header)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode >= http.StatusBadRequest {
 		return fmt.Errorf("Failed to create %s, %s: %s", resource, resp.Status, readBody(resp))
 	}
 
-	if len(res) > 0 {
-		return common.JSONDecode(resp.Body, res[0])
-	}
 	return common.JSONDecode(resp.Body, value)
 }
 

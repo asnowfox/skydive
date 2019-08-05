@@ -162,10 +162,10 @@ var LinkLabelLatency = Vue.extend({
       const a = link.source.metadata;
       const b = link.target.metadata;
 
-      if (!a.Capture) {
+      if (!a.Captures) {
         return;
       }
-      if (!b.Capture) {
+      if (!b.Captures) {
         return;
       }
 
@@ -325,6 +325,18 @@ var TopologyGraphLayout = function(vm, selector) {
   networkpolicyMarker("egress", "allow", "begin");
   networkpolicyMarker("egress", "allow", "end");
   kubeDefaultMarker("default")
+
+  self.svg.append("defs").append("marker")
+    .attr("id", "arrowhead")
+    .attr("viewBox", "0 -5 10 10")
+    .attr("refX", 4)
+    .attr("refY", 0)
+    .attr("markerWidth", 4)
+    .attr("markerHeight", 4)
+    .attr("orient", "auto")
+    .append("path")
+      .attr("fill", "#111")
+      .attr("d", "M0,-1L1,0L0,1");
 
   this.g = this.svg.append("g");
 
@@ -828,12 +840,27 @@ TopologyGraphLayout.prototype = {
       }
     }
 
-    if (node.metadata.Capture && node.metadata.Capture.State === "active" &&
-        (!node._metadata.Capture || node._metadata.Capture.State !== "active")) {
+    var findActive = function(objects) {
+      for (var i in objects) {
+        if (objects[i].State == "active") return true;
+      }
+      return false;
+    };
+
+    if (node.metadata.Captures && findActive(node.metadata.Captures) &&
+        (!node._metadata.Captures || !findActive(node._metadata.Captures))) {
       this.captureStarted(node);
-    } else if (!node.metadata.Capture && node._metadata.Capture) {
+    } else if (!node.metadata.Captures && node._metadata.Captures) {
       this.captureStopped(node);
     }
+
+    if (node.metadata.PacketInjections && findActive(node.metadata.PacketInjections) &&
+        (!node._metadata.PacketInjections || !findActive(node._metadata.PacketInjections))) {
+      this.injectionStarted(node);
+    } else if (!node.metadata.PacketInjections && node._metadata.PacketInjections) {
+      this.injectionStopped(node);
+    }
+
     if (node.metadata.Manager && !node._metadata.Manager) {
       this.managerSet(node);
     }
@@ -1032,6 +1059,21 @@ TopologyGraphLayout.prototype = {
 
   captureStopped: function(d) {
     this.g.select("#node-" + d.id).select('image.capture').remove();
+  },
+
+  injectionStarted: function(d) {
+    var size = this.nodeSize(d);
+    this.g.select("#node-" + d.id).append("image")
+      .attr("class", "injection")
+      .attr("x", -size)
+      .attr("y", size - 8)
+      .attr("width", 16)
+      .attr("height", 16)
+      .attr("xlink:href", injectionIndicatorImg);
+  },
+
+  injectionStopped: function(d) {
+    this.g.select("#node-" + d.id).select('image.injection').remove();
   },
 
   groupOwnerSet: function(d) {
@@ -1579,6 +1621,11 @@ TopologyGraphLayout.prototype = {
         return "url(#arrowhead-default)";
       }
     }
+
+    if (link.metadata["Directed"]) {
+       return "url(#arrowhead)";
+    }
+
     return "url(#arrowhead-none)";
   },
 
@@ -1642,8 +1689,11 @@ TopologyGraphLayout.prototype = {
     nodeEnter.filter(function(d) { return d.isGroupOwner(); })
       .each(this.groupOwnerSet.bind(this));
 
-    nodeEnter.filter(function(d) { return d.metadata.Capture; })
+    nodeEnter.filter(function(d) { return d.metadata.Captures; })
       .each(this.captureStarted.bind(this));
+
+    nodeEnter.filter(function(d) { return d.metadata.PacketInjections; })
+      .each(this.injectionStarted.bind(this));
 
     nodeEnter.filter(function(d) { return d.metadata.Manager; })
       .each(this.managerSet.bind(this));
@@ -1678,8 +1728,8 @@ TopologyGraphLayout.prototype = {
       .attr("class", this.linkWrapClass)
       .attr("marker-end", function(d) { return self.arrowhead(d.link); });
 
-    linkWrapEnter.filter(function(d) { return d._emphasized; })
-      .each(this.emphasizeEdge.bind(this));
+    linkWrapEnter.filter(function(d) { return d.link._emphasized; })
+      .each(function(d) { self.emphasizeEdge(d.link) });
 
     this.linkWrap = linkWrapEnter.merge(this.linkWrap);
 

@@ -18,7 +18,6 @@
 package packetinjector
 
 import (
-	"errors"
 	"fmt"
 	"math/rand"
 	"net"
@@ -29,21 +28,26 @@ import (
 	"github.com/google/gopacket/layers"
 	"github.com/skydive-project/skydive/common"
 	"github.com/skydive-project/skydive/flow"
-	"github.com/skydive-project/skydive/graffiti/graph"
 	"github.com/skydive-project/skydive/logging"
+)
+
+var (
+	options = gopacket.SerializeOptions{
+		ComputeChecksums: true,
+		FixLengths:       true,
+	}
 )
 
 // ForgedPacketGenerator is used to forge packets. It creates
 // a gopacket.Packet with the proper layers that can be directly
 // inserted into a socket.
 type ForgedPacketGenerator struct {
-	*PacketInjectionParams
-	layerType      gopacket.LayerType
-	srcMAC, dstMAC net.HardwareAddr
-	srcIP, dstIP   net.IP
+	*PacketInjectionRequest
+	LayerType gopacket.LayerType
+	close     chan bool
 }
 
-func forgePacket(packetType string, layerType gopacket.LayerType, srcMAC, dstMAC net.HardwareAddr, TTL uint8, srcIP, dstIP net.IP, srcPort, dstPort int64, ID int64, data string) ([]byte, gopacket.Packet, error) {
+func forgePacket(packetType string, layerType gopacket.LayerType, srcMAC, dstMAC net.HardwareAddr, TTL uint8, srcIP, dstIP net.IP, srcPort, dstPort uint16, ID uint64, data string) ([]byte, gopacket.Packet, error) {
 	var l []gopacket.SerializableLayer
 
 	payload := gopacket.Payload([]byte(data))
@@ -71,7 +75,7 @@ func forgePacket(packetType string, layerType gopacket.LayerType, srcMAC, dstMAC
 		ipLayer := &layers.IPv6{Version: 6, SrcIP: srcIP, DstIP: dstIP, NextHeader: layers.IPProtocolICMPv6}
 		icmpLayer := &layers.ICMPv6{
 			TypeCode:  layers.CreateICMPv6TypeCode(layers.ICMPv6TypeEchoRequest, 0),
-			TypeBytes: []byte{byte(ID & int64(0xFF00) >> 8), byte(ID & int64(0xFF)), 0, 0},
+			TypeBytes: []byte{byte(ID & uint64(0xFF00) >> 8), byte(ID & uint64(0xFF)), 0, 0},
 		}
 		icmpLayer.SetNetworkLayerForChecksum(ipLayer)
 
@@ -121,19 +125,30 @@ func forgePacket(packetType string, layerType gopacket.LayerType, srcMAC, dstMAC
 	return packetData, gopacket.NewPacket(packetData, layerType, gopacket.Default), nil
 }
 
+// Close the packet generator
+func (f *ForgedPacketGenerator) Close() {
+	f.close <- true
+}
+
 // PacketSource returns a channel when forged packets are pushed
 func (f *ForgedPacketGenerator) PacketSource() chan *Packet {
 	ch := make(chan *Packet)
 
 	go func() {
+		defer close(ch)
+
 		payload := f.Payload
 		// use same size as ping when no payload specified
 		if len(payload) == 0 {
 			payload = common.RandString(56)
 		}
 
-		for i := int64(0); i < f.Count; i++ {
-			id := int64(f.ID)
+		if f.Count == 0 {
+			f.Count = 1
+		}
+
+		for i := uint64(0); i < f.Count; i++ {
+			id := uint64(f.ICMPID)
 			if strings.HasPrefix(f.Type, "icmp") && f.Increment {
 				id += i
 			}
@@ -142,54 +157,39 @@ func (f *ForgedPacketGenerator) PacketSource() chan *Packet {
 				payload = payload + common.RandString(int(f.IncrementPayload))
 			}
 
-			packetData, packet, err := forgePacket(f.Type, f.layerType, f.srcMAC, f.dstMAC, f.TTL, f.srcIP, f.dstIP, f.SrcPort, f.DstPort, id, payload)
+			packetData, packet, err := forgePacket(f.Type, f.LayerType, f.SrcMAC, f.DstMAC, f.TTL, f.SrcIP, f.DstIP, f.SrcPort, f.DstPort, id, payload)
 			if err != nil {
 				logging.GetLogger().Error(err)
 				return
 			}
 
-			ch <- &Packet{data: packetData, gopacket: packet}
+			select {
+			case <-f.close:
+				return
+			case ch <- &Packet{data: packetData, gopacket: packet}:
+			}
 
-			if i != f.Count-1 {
-				time.Sleep(time.Millisecond * time.Duration(f.Interval))
+			if i != f.Count-1 && f.Interval != 0 {
+				select {
+				case <-f.close:
+					return
+				case <-time.After(time.Millisecond * time.Duration(f.Interval)):
+				}
 			}
 		}
+		ch <- nil
 	}()
 
 	return ch
 }
 
 // NewForgedPacketGenerator returns a new generator of forged packets
-func NewForgedPacketGenerator(pp *PacketInjectionParams, srcNode *graph.Node) (*ForgedPacketGenerator, error) {
-	encapType, _ := srcNode.GetFieldString("EncapType")
+func NewForgedPacketGenerator(pp *PacketInjectionRequest, encapType string) (*ForgedPacketGenerator, error) {
 	layerType, _ := flow.GetFirstLayerType(encapType)
 
-	srcIP := getIP(pp.SrcIP)
-	if srcIP == nil {
-		return nil, errors.New("Source Node doesn't have proper IP")
-	}
-
-	dstIP := getIP(pp.DstIP)
-	if dstIP == nil {
-		return nil, errors.New("Destination Node doesn't have proper IP")
-	}
-
-	srcMAC, err := net.ParseMAC(pp.SrcMAC)
-	if err != nil || srcMAC == nil {
-		return nil, errors.New("Source Node doesn't have proper MAC")
-	}
-
-	dstMAC, err := net.ParseMAC(pp.DstMAC)
-	if err != nil || dstMAC == nil {
-		return nil, errors.New("Destination Node doesn't have proper MAC")
-	}
-
 	return &ForgedPacketGenerator{
-		PacketInjectionParams: pp,
-		srcIP:     srcIP,
-		dstIP:     dstIP,
-		srcMAC:    srcMAC,
-		dstMAC:    dstMAC,
-		layerType: layerType,
+		PacketInjectionRequest: pp,
+		LayerType:              layerType,
+		close:                  make(chan bool, 1),
 	}, nil
 }

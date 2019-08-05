@@ -18,8 +18,8 @@
 package flow
 
 import (
+	"bytes"
 	"encoding/binary"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	fmt "fmt"
@@ -30,7 +30,7 @@ import (
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
-	"github.com/spaolacci/murmur3"
+	"github.com/pierrec/xxHash/xxHash64"
 
 	"github.com/skydive-project/skydive/common"
 	"github.com/skydive-project/skydive/config"
@@ -59,9 +59,11 @@ const (
 // flowState is used internally to track states within the flow table.
 // it is added to the generated Flow struct by Makefile
 type flowState struct {
-	lastMetric    *FlowMetric
+	lastMetric    FlowMetric
 	rtt1stPacket  int64
 	updateVersion int64
+	ipv4          *layers.IPv4
+	ipv6          *layers.IPv6
 }
 
 // Packet describes one packet
@@ -81,12 +83,6 @@ type Packet struct {
 // PacketSequence represents a suite of parent/child Packet
 type PacketSequence struct {
 	Packets []*Packet
-}
-
-// RawPackets embeds flow RawPacket array with the associated link type
-type RawPackets struct {
-	LinkType   layers.LinkType
-	RawPackets []*RawPacket
 }
 
 // LayerKeyMode defines what are the layers used for the flow key calculation
@@ -169,13 +165,6 @@ type Opts struct {
 	LayerKeyMode LayerKeyMode
 	AppPortMap   *ApplicationPortMap
 	ExtraLayers  ExtraLayers
-}
-
-// UUIDs describes UUIDs that can be applied to flows
-type UUIDs struct {
-	ParentUUID string
-	L2ID       int64
-	L3ID       int64
 }
 
 func (l LayerKeyMode) String() string {
@@ -280,7 +269,7 @@ func (p *Packet) ApplicationFlow() (gopacket.Flow, error) {
 }
 
 // TransportFlow returns first transport flow
-func (p *Packet) TransportFlow() (gopacket.Flow, error) {
+func (p *Packet) TransportFlow(swap bool) (gopacket.Flow, error) {
 	layer := p.TransportLayer()
 	if layer == nil {
 		return gopacket.Flow{}, ErrLayerNotFound
@@ -302,6 +291,9 @@ func (p *Packet) TransportFlow() (gopacket.Flow, error) {
 				binary.BigEndian.PutUint32(value32, encap.(*layers.Geneve).VNI)
 			}
 
+			if swap {
+				return gopacket.NewFlow(0, value16, value32), nil
+			}
 			return gopacket.NewFlow(0, value32, value16), nil
 		}
 	}
@@ -309,28 +301,62 @@ func (p *Packet) TransportFlow() (gopacket.Flow, error) {
 	return layer.TransportFlow(), nil
 }
 
-// Key returns the unique flow key
-// The unique key is calculated based on parentUUID, network, transport and applicable layers
-func (p *Packet) Key(parentUUID string, opts Opts) string {
-	var uuid uint64
+// Keys returns keys of the packet
+func (p *Packet) Keys(parentUUID string, uuids *UUIDs, opts *Opts) (uint64, uint64, uint64) {
+	hasher := xxHash64.New(0)
+	swap := false
 
-	// uses L2 is requested or if there is no network layer
-	if opts.LayerKeyMode == L2KeyMode || p.NetworkLayer() == nil {
-		if layer := p.LinkLayer(); layer != nil {
-			uuid ^= layer.LinkFlow().FastHash()
+	l2Layer := p.LinkLayer()
+	l3Layer := p.NetworkLayer()
+	swapFromNetwork := true
+
+	if (opts.LayerKeyMode == L2KeyMode && l2Layer != nil) ||
+		l3Layer == nil {
+
+		swapFromNetwork = false
+		src, dst := l2Layer.LinkFlow().Endpoints()
+		cmp := bytes.Compare(src.Raw(), dst.Raw())
+		swap = cmp > 0
+		if cmp == 0 && l3Layer != nil {
+			swapFromNetwork = true
 		}
 	}
-	if layer := p.NetworkLayer(); layer != nil {
-		uuid ^= layer.NetworkFlow().FastHash()
-	}
-	if tf, err := p.TransportFlow(); err == nil {
-		uuid ^= tf.FastHash()
-	}
-	if af, err := p.ApplicationFlow(); err == nil {
-		uuid ^= af.FastHash()
+	if swapFromNetwork {
+		src, dst := l3Layer.NetworkFlow().Endpoints()
+		cmp := bytes.Compare(src.Raw(), dst.Raw())
+		swap = cmp > 0
+		if cmp == 0 {
+			if tf, err := p.TransportFlow(false); err == nil {
+				src, dst := tf.Endpoints()
+				swap = bytes.Compare(src.Raw(), dst.Raw()) > 0
+			}
+		}
 	}
 
-	return parentUUID + strconv.FormatUint(uuid, 10)
+	if l3Layer != nil {
+		hashFlow(l3Layer.NetworkFlow(), hasher, swap)
+	}
+	if tf, err := p.TransportFlow(swap); err == nil {
+		hashFlow(tf, hasher, swap)
+	}
+	if af, err := p.ApplicationFlow(); err == nil {
+		src, dst := af.Endpoints()
+		hashFlow(af, hasher, bytes.Compare(src.Raw(), dst.Raw()) > 0)
+	}
+	l3Key := hasher.Sum64()
+	l2Key := l3Key
+
+	// uses L2 is requested or if there is no network layer
+	if (opts.LayerKeyMode == L2KeyMode && p.LinkLayer() != nil) || p.NetworkLayer() == nil {
+		if layer := p.LinkLayer(); layer != nil {
+			hashFlow(layer.LinkFlow(), hasher, swap)
+			l2Key = hasher.Sum64()
+		}
+	}
+
+	hasher.Write([]byte(parentUUID))
+
+	return hasher.Sum64(), l2Key, l3Key
 }
 
 // Value returns int32 value of a FlowProtocol
@@ -389,22 +415,23 @@ func GetFirstLayerType(encapType string) (gopacket.LayerType, layers.LinkType) {
 
 // LayersPath returns path and the application of all the layers separated by a slash.
 func LayersPath(ls []gopacket.Layer) (string, string) {
-	var app, path string
+	var app string
+	var path strings.Builder
+
 	for i, layer := range ls {
 		tp := layer.LayerType()
 		if tp == layers.LayerTypeLinuxSLL {
 			continue
-		}
-		if tp == gopacket.LayerTypePayload || tp == gopacket.LayerTypeDecodeFailure {
+		} else if tp == gopacket.LayerTypePayload || tp == gopacket.LayerTypeDecodeFailure {
 			break
 		}
 		if i > 0 {
-			path += "/"
+			path.WriteString("/")
 		}
 		app = layer.LayerType().String()
-		path += app
+		path.WriteString(app)
 	}
-	return path, app
+	return path.String(), app
 }
 
 func linkID(p *Packet) int64 {
@@ -447,7 +474,7 @@ func NewFlow() *Flow {
 }
 
 // NewFlowFromGoPacket creates a new flow from the given gopacket
-func NewFlowFromGoPacket(p gopacket.Packet, nodeTID string, uuids UUIDs, opts Opts) *Flow {
+func NewFlowFromGoPacket(p gopacket.Packet, parentUUID string, uuids *UUIDs, opts *Opts) *Flow {
 	f := NewFlow()
 
 	var length int64
@@ -462,41 +489,61 @@ func NewFlowFromGoPacket(p gopacket.Packet, nodeTID string, uuids UUIDs, opts Op
 		Length:   length,
 	}
 
-	f.initFromPacket(packet.Key(uuids.ParentUUID, opts), packet, nodeTID, uuids, opts)
+	key, l2Key, l3Key := packet.Keys(parentUUID, uuids, opts)
+
+	f.initFromPacket(key, l2Key, l3Key, packet, parentUUID, uuids, opts)
 
 	return f
 }
 
-// UpdateUUID updates the flow UUID based on protocotols layers path and layers IDs
-func (f *Flow) UpdateUUID(key string, opts Opts) {
-	layersPath := strings.Replace(f.LayersPath, "Dot1Q/", "", -1)
-
-	hasher := murmur3.New64()
-	f.Network.Hash(hasher)
-	f.ICMP.Hash(hasher)
-	f.Transport.Hash(hasher)
-
-	// only need network and transport to compute l3trackingID
-	hasher.Write([]byte(strings.TrimPrefix(layersPath, "Ethernet/")))
-	f.L3TrackingID = hex.EncodeToString(hasher.Sum(nil))
-
-	if opts.LayerKeyMode == L2KeyMode || f.Network == nil {
-		f.Link.Hash(hasher)
-	}
-
-	hasher.Write([]byte(layersPath))
-	f.TrackingID = hex.EncodeToString(hasher.Sum(nil))
+// setUUIDs set the flow UUIDs based on keys generated from gopacket flow
+// l2Key stands for layer2 and beyond
+// l3Key stands for layer3 and beyond
+func (f *Flow) setUUIDs(key, l2Key, l3Key uint64) {
+	f.TrackingID = strconv.FormatUint(l2Key, 16)
+	f.L3TrackingID = strconv.FormatUint(l3Key, 16)
 
 	value64 := make([]byte, 8)
 	binary.BigEndian.PutUint64(value64, uint64(f.Start))
+
+	hasher := xxHash64.New(key)
 	hasher.Write(value64)
 	hasher.Write([]byte(f.NodeTID))
 
-	// include key so that we are sure that two flows with different keys don't
-	// give the same UUID due to different ways of hash the headers.
-	hasher.Write([]byte(key))
+	f.UUID = strconv.FormatUint(hasher.Sum64(), 16)
+}
 
-	f.UUID = hex.EncodeToString(hasher.Sum(nil))
+// SetUUIDs updates the UUIDs using the flow layers and returns l2/l3 keys
+func (f *Flow) SetUUIDs(key uint64, opts Opts) (uint64, uint64) {
+	hasher := xxHash64.New(0)
+	swap := false
+	if f.Link != nil && ((opts.LayerKeyMode == L2KeyMode &&
+		strings.Compare(f.Link.A, f.Link.B) != 0) ||
+		f.Network == nil) {
+
+		swap = strings.Compare(f.Link.A, f.Link.B) > 0
+	} else {
+		if cmp := strings.Compare(f.Network.A, f.Network.B); cmp == 0 && f.Transport != nil {
+			swap = f.Transport.A > f.Transport.B
+		} else {
+			swap = cmp > 0
+		}
+	}
+	f.Network.Hash(hasher, swap)
+	f.Transport.Hash(hasher, swap)
+	f.ICMP.Hash(hasher)
+
+	l3Key := hasher.Sum64()
+	l2Key := l3Key
+
+	if (opts.LayerKeyMode == L2KeyMode && f.Link != nil) || f.Network == nil {
+		f.Link.Hash(hasher, swap)
+		l2Key = hasher.Sum64()
+	}
+
+	f.setUUIDs(key, l2Key, l3Key)
+
+	return l2Key, l3Key
 }
 
 // LinkType returns the Link type of the flow according the its first available layer.
@@ -517,24 +564,25 @@ func (f *Flow) LinkType() (layers.LinkType, error) {
 	return 0, errors.New("LinkType unknown")
 }
 
-// Init initializes the flow with the given Timestamp, nodeTID and related UUIDs
-func (f *Flow) Init(now int64, nodeTID string, uuids UUIDs) {
+// Init initializes the flow with the given Timestamp, parentUUID and table uuids
+func (f *Flow) Init(now int64, parentUUID string, uuids *UUIDs) {
 	f.Start = now
 	f.Last = now
 
 	f.Metric.Start = now
 	f.Metric.Last = now
 
-	f.NodeTID = nodeTID
-	f.ParentUUID = uuids.ParentUUID
+	f.NodeTID = uuids.NodeTID
+	f.CaptureID = uuids.CaptureID
+	f.ParentUUID = parentUUID
 
 	f.FinishType = FlowFinishType_NOT_FINISHED
 }
 
 // initFromPacket initializes the flow based on packet data, flow key and ids
-func (f *Flow) initFromPacket(key string, packet *Packet, nodeTID string, uuids UUIDs, opts Opts) {
+func (f *Flow) initFromPacket(key, l2Key, l3Key uint64, packet *Packet, parentUUID string, uuids *UUIDs, opts *Opts) {
 	now := common.UnixMillis(packet.GoPacket.Metadata().CaptureInfo.Timestamp)
-	f.Init(now, nodeTID, uuids)
+	f.Init(now, parentUUID, uuids)
 
 	f.newLinkLayer(packet)
 
@@ -549,14 +597,14 @@ func (f *Flow) initFromPacket(key string, packet *Packet, nodeTID string, uuids 
 	f.newApplicationLayer(packet, opts)
 
 	// need to have as most variable filled as possible to get correct UUID
-	f.UpdateUUID(key, opts)
+	f.setUUIDs(key, l2Key, l3Key)
 
 	// update metrics
 	f.Update(packet, opts)
 }
 
 // Update a flow metrics and latency
-func (f *Flow) Update(packet *Packet, opts Opts) {
+func (f *Flow) Update(packet *Packet, opts *Opts) {
 	now := common.UnixMillis(packet.GoPacket.Metadata().CaptureInfo.Timestamp)
 	f.Last = now
 	f.Metric.Last = now
@@ -583,6 +631,11 @@ func (f *Flow) Update(packet *Packet, opts Opts) {
 	// depends on options
 	if f.TCPMetric != nil {
 		f.updateTCPMetrics(packet)
+	}
+	if (opts.ExtraLayers & DNSLayer) != 0 {
+		if layer := packet.Layer(layers.LayerTypeDNS); layer != nil {
+			f.updateDNSLayer(layer, packet.GoPacket.Metadata().CaptureInfo.Timestamp)
+		}
 	}
 }
 
@@ -661,11 +714,87 @@ func (f *Flow) updateRTT(packet *Packet) {
 	if tcpPacket, ok := tcpLayer.(*layers.TCP); ok {
 		if tcpPacket.SYN && f.XXX_state.rtt1stPacket == 0 {
 			f.XXX_state.rtt1stPacket = packet.GoPacket.Metadata().Timestamp.UnixNano()
-		} else if f.XXX_state.rtt1stPacket != 0 && (tcpPacket.SYN && tcpPacket.ACK) || tcpPacket.RST {
+		} else if f.XXX_state.rtt1stPacket != 0 && ((tcpPacket.SYN && tcpPacket.ACK) || tcpPacket.RST) {
 			f.Metric.RTT = packet.GoPacket.Metadata().Timestamp.UnixNano() - f.XXX_state.rtt1stPacket
 			f.XXX_state.rtt1stPacket = 0
 		}
 	}
+}
+
+func (f *Flow) getNetworkLayer(packet *Packet) (*layers.IPv4, *layers.IPv6) {
+	if f.XXX_state.ipv4 != nil {
+		return f.XXX_state.ipv4, nil
+	}
+	if f.XXX_state.ipv6 != nil {
+		return nil, f.XXX_state.ipv6
+	}
+
+	ipv4Layer := packet.Layer(layers.LayerTypeIPv4)
+	if ipv4Packet, ok := ipv4Layer.(*layers.IPv4); ok {
+		f.XXX_state.ipv4 = ipv4Packet
+		return f.XXX_state.ipv4, nil
+	}
+
+	ipv6Layer := packet.Layer(layers.LayerTypeIPv6)
+	if ipv6Packet, ok := ipv6Layer.(*layers.IPv6); ok {
+		f.XXX_state.ipv6 = ipv6Packet
+		return nil, f.XXX_state.ipv6
+	}
+
+	return nil, nil
+}
+
+func (f *Flow) isABPacket(packet *Packet) bool {
+	if f.Network == nil {
+		return false
+	}
+	cmp := false
+
+	ipv4Packet, ipv6Packet := f.getNetworkLayer(packet)
+	if ipv4Packet != nil {
+		cmp = f.Network.A == ipv4Packet.SrcIP.String()
+		if bytes.Compare(ipv4Packet.SrcIP, ipv4Packet.DstIP) == 0 && f.Transport != nil {
+			tcpLayer := packet.Layer(layers.LayerTypeTCP)
+			if tcpPacket, ok := tcpLayer.(*layers.TCP); ok {
+				return f.Transport.A > int64(tcpPacket.SrcPort)
+			}
+			udpLayer := packet.Layer(layers.LayerTypeUDP)
+			if udpPacket, ok := udpLayer.(*layers.UDP); ok {
+				return f.Transport.A > int64(udpPacket.SrcPort)
+			}
+			sctpLayer := packet.Layer(layers.LayerTypeSCTP)
+			if sctpPacket, ok := sctpLayer.(*layers.SCTP); ok {
+				return f.Transport.A > int64(sctpPacket.SrcPort)
+			}
+			icmpLayer := packet.Layer(layers.LayerTypeICMPv4)
+			if icmpPacket, ok := icmpLayer.(*layers.ICMPv4); ok {
+				return f.ICMP.Type > ICMPv4TypeToFlowICMPType(icmpPacket.TypeCode.Type())
+			}
+		}
+	}
+	if ipv6Packet != nil {
+		cmp = f.Network.A == ipv6Packet.SrcIP.String()
+		if bytes.Compare(ipv6Packet.SrcIP, ipv6Packet.DstIP) == 0 && f.Transport != nil {
+			tcpLayer := packet.Layer(layers.LayerTypeTCP)
+			if tcpPacket, ok := tcpLayer.(*layers.TCP); ok {
+				return f.Transport.A > int64(tcpPacket.SrcPort)
+			}
+			udpLayer := packet.Layer(layers.LayerTypeUDP)
+			if udpPacket, ok := udpLayer.(*layers.UDP); ok {
+				return f.Transport.A > int64(udpPacket.SrcPort)
+			}
+			sctpLayer := packet.Layer(layers.LayerTypeSCTP)
+			if sctpPacket, ok := sctpLayer.(*layers.SCTP); ok {
+				return f.Transport.A > int64(sctpPacket.SrcPort)
+			}
+			icmpLayer := packet.Layer(layers.LayerTypeICMPv6)
+			if icmpPacket, ok := icmpLayer.(*layers.ICMPv6); ok {
+				return f.ICMP.Type > ICMPv6TypeToFlowICMPType(icmpPacket.TypeCode.Type())
+			}
+		}
+	}
+
+	return cmp
 }
 
 func (f *Flow) updateMetricsWithLinkLayer(packet *Packet) bool {
@@ -679,7 +808,12 @@ func (f *Flow) updateMetricsWithLinkLayer(packet *Packet) bool {
 		length = getLinkLayerLength(ethernetPacket)
 	}
 
-	if f.Link.A == ethernetPacket.SrcMAC.String() {
+	/* found a layer that can identify the connection way */
+	cmp := f.Link.A == ethernetPacket.SrcMAC.String()
+	if bytes.Compare(ethernetPacket.SrcMAC, ethernetPacket.DstMAC) == 0 {
+		cmp = f.isABPacket(packet)
+	}
+	if cmp {
 		f.Metric.ABPackets++
 		f.Metric.ABBytes += length
 	} else {
@@ -691,8 +825,8 @@ func (f *Flow) updateMetricsWithLinkLayer(packet *Packet) bool {
 }
 
 func (f *Flow) newNetworkLayer(packet *Packet) error {
-	ipv4Layer := packet.Layer(layers.LayerTypeIPv4)
-	if ipv4Packet, ok := ipv4Layer.(*layers.IPv4); ok {
+	ipv4Packet, ipv6Packet := f.getNetworkLayer(packet)
+	if ipv4Packet != nil {
 		f.Network = &FlowLayer{
 			Protocol: FlowProtocol_IPV4,
 			A:        ipv4Packet.SrcIP.String(),
@@ -712,8 +846,7 @@ func (f *Flow) newNetworkLayer(packet *Packet) error {
 		return nil
 	}
 
-	ipv6Layer := packet.Layer(layers.LayerTypeIPv6)
-	if ipv6Packet, ok := ipv6Layer.(*layers.IPv6); ok {
+	if ipv6Packet != nil {
 		f.Network = &FlowLayer{
 			Protocol: FlowProtocol_IPV6,
 			A:        ipv6Packet.SrcIP.String(),
@@ -743,12 +876,12 @@ func (f *Flow) newNetworkLayer(packet *Packet) error {
 }
 
 func (f *Flow) updateMetricsWithNetworkLayer(packet *Packet, length int64) error {
-	ipv4Layer := packet.Layer(layers.LayerTypeIPv4)
-	if ipv4Packet, ok := ipv4Layer.(*layers.IPv4); ok {
+	ipv4Packet, ipv6Packet := f.getNetworkLayer(packet)
+	if ipv4Packet != nil {
 		if length == 0 {
 			length = int64(ipv4Packet.Length)
 		}
-		if f.Network.A == ipv4Packet.SrcIP.String() {
+		if f.isABPacket(packet) {
 			f.Metric.ABPackets++
 			f.Metric.ABBytes += length
 		} else {
@@ -758,12 +891,11 @@ func (f *Flow) updateMetricsWithNetworkLayer(packet *Packet, length int64) error
 
 		return nil
 	}
-	ipv6Layer := packet.Layer(layers.LayerTypeIPv6)
-	if ipv6Packet, ok := ipv6Layer.(*layers.IPv6); ok {
+	if ipv6Packet != nil {
 		if length == 0 {
 			length = int64(ipv6Packet.Length)
 		}
-		if f.Network.A == ipv6Packet.SrcIP.String() {
+		if f.isABPacket(packet) {
 			f.Metric.ABPackets++
 			f.Metric.ABBytes += length
 		} else {
@@ -803,19 +935,16 @@ func (f *Flow) updateTCPMetrics(packet *Packet) error {
 
 	var srcIP string
 	var timeToLive uint32
+	ipv4Packet, ipv6Packet := f.getNetworkLayer(packet)
 	switch f.Network.Protocol {
 	case FlowProtocol_IPV4:
-		ipv4Layer := packet.Layer(layers.LayerTypeIPv4)
-		ipv4Packet, ok := ipv4Layer.(*layers.IPv4)
-		if !ok {
+		if ipv4Packet == nil {
 			return ErrLayerNotFound
 		}
 		srcIP = ipv4Packet.SrcIP.String()
 		timeToLive = uint32(ipv4Packet.TTL)
 	case FlowProtocol_IPV6:
-		ipv6Layer := packet.Layer(layers.LayerTypeIPv6)
-		ipv6Packet, ok := ipv6Layer.(*layers.IPv6)
-		if !ok {
+		if ipv6Packet == nil {
 			return ErrLayerNotFound
 		}
 		srcIP = ipv6Packet.SrcIP.String()
@@ -853,7 +982,7 @@ func (f *Flow) updateTCPMetrics(packet *Packet) error {
 	return nil
 }
 
-func (f *Flow) newTransportLayer(packet *Packet, opts Opts) error {
+func (f *Flow) newTransportLayer(packet *Packet, opts *Opts) error {
 	if layer := packet.Layer(layers.LayerTypeTCP); layer != nil {
 		f.Transport = &TransportLayer{Protocol: FlowProtocol_TCP}
 
@@ -897,7 +1026,33 @@ func (f *Flow) newTransportLayer(packet *Packet, opts Opts) error {
 	return nil
 }
 
-func (f *Flow) newApplicationLayer(packet *Packet, opts Opts) error {
+func (f *Flow) updateDNSLayer(layer gopacket.Layer, timestamp time.Time) error {
+	d := layer.(*layers.DNS)
+	dnsToAppend := &fl.DNS{
+		AA:           d.AA,
+		ID:           d.ID,
+		QR:           d.QR,
+		RA:           d.RA,
+		RD:           d.RD,
+		TC:           d.TC,
+		ANCount:      d.ANCount,
+		ARCount:      d.ARCount,
+		NSCount:      d.NSCount,
+		QDCount:      d.QDCount,
+		ResponseCode: d.ResponseCode.String(),
+		OpCode:       d.OpCode.String(),
+		Z:            d.Z,
+	}
+	dnsToAppend.Questions = fl.GetDNSQuestions(d.Questions)
+	dnsToAppend.Answers = fl.GetDNSRecords(d.Answers)
+	dnsToAppend.Authorities = fl.GetDNSRecords(d.Authorities)
+	dnsToAppend.Additionals = fl.GetDNSRecords(d.Additionals)
+	dnsToAppend.Timestamp = timestamp
+	f.DNS = dnsToAppend
+	return nil
+}
+
+func (f *Flow) newApplicationLayer(packet *Packet, opts *Opts) error {
 	if (opts.ExtraLayers & DHCPv4Layer) != 0 {
 		if layer := packet.Layer(layers.LayerTypeDHCPv4); layer != nil {
 			d := layer.(*layers.DHCPv4)
@@ -915,33 +1070,7 @@ func (f *Flow) newApplicationLayer(packet *Packet, opts Opts) error {
 
 	if (opts.ExtraLayers & DNSLayer) != 0 {
 		if layer := packet.Layer(layers.LayerTypeDNS); layer != nil {
-			d := layer.(*layers.DNS)
-			f.DNS = &fl.DNS{
-				AA:      d.AA,
-				ID:      d.ID,
-				QR:      d.QR,
-				RA:      d.RA,
-				RD:      d.RD,
-				TC:      d.TC,
-				ANCount: d.ANCount,
-				ARCount: d.ARCount,
-				NSCount: d.NSCount,
-				QDCount: d.QDCount,
-			}
-			if len(d.Questions) > 0 {
-				questions := make([]string, len(d.Questions))
-				for i, v := range d.Questions {
-					questions[i] = string(v.Name)
-				}
-				f.DNS.DNSQuestions = questions
-			}
-			if len(d.Answers) > 0 {
-				answers := make([]string, len(d.Answers))
-				for i, v := range d.Answers {
-					answers[i] = string(v.IP)
-				}
-				f.DNS.DNSAnswers = answers
-			}
+			f.updateDNSLayer(layer, packet.GoPacket.Metadata().CaptureInfo.Timestamp)
 			return nil
 		}
 	}
@@ -962,19 +1091,33 @@ func (f *Flow) newApplicationLayer(packet *Packet, opts Opts) error {
 	return nil
 }
 
+// ProcessGoPacket takes a gopacket as input and filter, defrag it.
+func ProcessGoPacket(packet gopacket.Packet, bpf *BPF, defragger *IPDefragger) (gopacket.Packet, *IPMetric) {
+	var ipMetric *IPMetric
+	if defragger != nil {
+		m, ok := defragger.Defrag(packet)
+		if !ok {
+			return nil, nil
+		}
+		ipMetric = m
+	}
+
+	if bpf != nil && !bpf.Matches(packet.Data()) {
+		return nil, nil
+	}
+
+	return packet, ipMetric
+}
+
 // PacketSeqFromGoPacket split original packet into multiple packets in
 // case of encapsulation like GRE, VXLAN, etc.
 func PacketSeqFromGoPacket(packet gopacket.Packet, outerLength int64, bpf *BPF, defragger *IPDefragger) *PacketSequence {
 	ps := &PacketSequence{}
 
-	// defragment and set ip metric if requested
 	var ipMetric *IPMetric
-	if defragger != nil {
-		m, ok := defragger.Defrag(packet)
-		if !ok {
-			return ps
-		}
-		ipMetric = m
+	packet, ipMetric = ProcessGoPacket(packet, bpf, defragger)
+	if packet == nil {
+		return ps
 	}
 
 	if packet.ErrorLayer() != nil {
@@ -983,11 +1126,6 @@ func PacketSeqFromGoPacket(packet gopacket.Packet, outerLength int64, bpf *BPF, 
 
 	if packet.LinkLayer() == nil && packet.NetworkLayer() == nil {
 		logging.GetLogger().Debugf("Unknown packet : %s\n", packet.Dump())
-		return ps
-	}
-
-	packetData := packet.Data()
-	if bpf != nil && !bpf.Matches(packetData) {
 		return ps
 	}
 
@@ -1009,6 +1147,8 @@ func PacketSeqFromGoPacket(packet gopacket.Packet, outerLength int64, bpf *BPF, 
 			outerLength = int64(ipv6Packet.Length)
 		}
 	}
+
+	packetData := packet.Data()
 
 	// length of the encapsulation header + the inner packet
 	topLayerIndex, topLayerOffset, topLayerLength := 0, 0, int(outerLength)
@@ -1095,165 +1235,6 @@ func PacketSeqFromSFlowSample(sample *layers.SFlowFlowSample, bpf *BPF, defragge
 	return pss
 }
 
-// GetStringField returns the value of a flow field
-func (f *FlowLayer) GetStringField(field string) (string, error) {
-	if f == nil {
-		return "", common.ErrFieldNotFound
-	}
-
-	switch field {
-	case "A":
-		return f.A, nil
-	case "B":
-		return f.B, nil
-	case "Protocol":
-		return f.Protocol.String(), nil
-	}
-	return "", common.ErrFieldNotFound
-}
-
-// GetFieldInt64 returns the value of a flow field
-func (f *FlowLayer) GetFieldInt64(field string) (int64, error) {
-	if f == nil {
-		return 0, common.ErrFieldNotFound
-	}
-
-	switch field {
-	case "ID":
-		return f.ID, nil
-	}
-	return 0, common.ErrFieldNotFound
-}
-
-//GetStringField returns the value of a transport layer field
-func (tl *TransportLayer) GetStringField(field string) (string, error) {
-	if tl == nil {
-		return "", common.ErrFieldNotFound
-	}
-
-	switch field {
-	case "Protocol":
-		return tl.Protocol.String(), nil
-	}
-	return "", common.ErrFieldNotFound
-}
-
-//GetFieldInt64 returns the value of a transport layer firld
-func (tl *TransportLayer) GetFieldInt64(field string) (int64, error) {
-	if tl == nil {
-		return 0, common.ErrFieldNotFound
-	}
-
-	switch field {
-	case "ID":
-		return tl.ID, nil
-	case "A":
-		return tl.A, nil
-	case "B":
-		return tl.B, nil
-	}
-	return 0, common.ErrFieldNotFound
-}
-
-// GetStringField returns the value of a ICMP field
-func (i *ICMPLayer) GetStringField(field string) (string, error) {
-	if i == nil {
-		return "", common.ErrFieldNotFound
-	}
-
-	switch field {
-	case "Type":
-		return i.Type.String(), nil
-	default:
-		return "", common.ErrFieldNotFound
-	}
-}
-
-// GetFieldInt64 returns the value of a ICMP field
-func (i *ICMPLayer) GetFieldInt64(field string) (int64, error) {
-	if i == nil {
-		return 0, common.ErrFieldNotFound
-	}
-
-	switch field {
-	case "ID":
-		return int64(i.ID), nil
-	default:
-		return 0, common.ErrFieldNotFound
-	}
-}
-
-// GetFieldInt64 returns the value of a IPMetric field
-func (i *IPMetric) GetFieldInt64(field string) (int64, error) {
-	if i == nil {
-		return 0, common.ErrFieldNotFound
-	}
-	switch field {
-	case "Fragments":
-		return i.Fragments, nil
-	case "FragmentErrors":
-		return i.FragmentErrors, nil
-	default:
-		return 0, common.ErrFieldNotFound
-	}
-}
-
-// GetFieldInt64 returns the value of a TCPMetric field
-func (i *TCPMetric) GetFieldInt64(field string) (int64, error) {
-	if i == nil {
-		return 0, common.ErrFieldNotFound
-	}
-
-	switch field {
-	case "ABSynTTL":
-		return int64(i.ABSynTTL), nil
-	case "BASynTTL":
-		return int64(i.BASynTTL), nil
-	case "ABSynStart":
-		return i.ABSynStart, nil
-	case "BASynStart":
-		return i.BASynStart, nil
-	case "ABFinStart":
-		return i.ABFinStart, nil
-	case "BAFinStart":
-		return i.BAFinStart, nil
-	case "ABRstStart":
-		return i.BARstStart, nil
-	case "BARstStart":
-		return i.BARstStart, nil
-	case "ABSegmentOutOfOrder":
-		return i.ABSegmentOutOfOrder, nil
-	case "ABSegmentSkipped":
-		return i.ABSegmentSkipped, nil
-	case "ABSegmentSkippedBytes":
-		return i.ABSegmentSkippedBytes, nil
-	case "ABPackets":
-		return i.ABPackets, nil
-	case "ABBytes":
-		return i.ABBytes, nil
-	case "ABSawStart":
-		return i.ABSawStart, nil
-	case "ABSawEnd":
-		return i.ABSawEnd, nil
-	case "BASegmentOutOfOrder":
-		return i.BASegmentOutOfOrder, nil
-	case "BASegmentSkipped":
-		return i.BASegmentSkipped, nil
-	case "BASegmentSkippedBytes":
-		return i.BASegmentSkippedBytes, nil
-	case "BAPackets":
-		return i.BAPackets, nil
-	case "BABytes":
-		return i.BABytes, nil
-	case "BASawStart":
-		return i.BASawStart, nil
-	case "BASawEnd":
-		return i.BASawEnd, nil
-	default:
-		return 0, common.ErrFieldNotFound
-	}
-}
-
 // GetFieldString returns the value of a Flow field
 func (f *Flow) GetFieldString(field string) (string, error) {
 	fields := strings.Split(field, ".")
@@ -1278,6 +1259,8 @@ func (f *Flow) GetFieldString(field string) (string, error) {
 		return f.NodeTID, nil
 	case "Application":
 		return f.Application, nil
+	case "CaptureID":
+		return f.CaptureID, nil
 	}
 
 	// sub field
@@ -1286,20 +1269,22 @@ func (f *Flow) GetFieldString(field string) (string, error) {
 	}
 
 	switch name {
-	case "Link":
-		return f.Link.GetStringField(fields[1])
-	case "Network":
-		return f.Network.GetStringField(fields[1])
+	case "Link", "ETHERNET":
+		if f.Link != nil {
+			return f.Link.GetFieldString(fields[1])
+		}
+	case "Network", "IPV4", "IPV6":
+		if f.Network != nil {
+			return f.Network.GetFieldString(fields[1])
+		}
 	case "ICMP":
-		return f.ICMP.GetStringField(fields[1])
-	case "Transport":
-		return f.Transport.GetStringField(fields[1])
-	case "UDP", "TCP", "SCTP":
-		return f.Transport.GetStringField(fields[1])
-	case "IPV4", "IPV6":
-		return f.Network.GetStringField(fields[1])
-	case "ETHERNET":
-		return f.Link.GetStringField(fields[1])
+		if f.ICMP != nil {
+			return f.ICMP.GetFieldString(fields[1])
+		}
+	case "Transport", "UDP", "TCP", "SCTP":
+		if f.Transport != nil {
+			return f.Transport.GetFieldString(fields[1])
+		}
 	}
 
 	// check extra layers
@@ -1310,6 +1295,11 @@ func (f *Flow) GetFieldString(field string) (string, error) {
 	}
 
 	return "", common.ErrFieldNotFound
+}
+
+// GetFieldBool returns the value of a boolean flow field
+func (f *Flow) GetFieldBool(field string) (bool, error) {
+	return false, common.ErrFieldNotFound
 }
 
 // GetFieldInt64 returns the value of a Flow field
@@ -1328,21 +1318,37 @@ func (f *Flow) GetFieldInt64(field string) (_ int64, err error) {
 	name := fields[0]
 	switch name {
 	case "Metric":
-		return f.Metric.GetFieldInt64(fields[1])
+		if f.Metric != nil {
+			return f.Metric.GetFieldInt64(fields[1])
+		}
 	case "LastUpdateMetric":
-		return f.LastUpdateMetric.GetFieldInt64(fields[1])
+		if f.LastUpdateMetric != nil {
+			return f.LastUpdateMetric.GetFieldInt64(fields[1])
+		}
 	case "TCPMetric":
-		return f.TCPMetric.GetFieldInt64(fields[1])
+		if f.TCPMetric != nil {
+			return f.TCPMetric.GetFieldInt64(fields[1])
+		}
 	case "IPMetric":
-		return f.IPMetric.GetFieldInt64(fields[1])
+		if f.IPMetric != nil {
+			return f.IPMetric.GetFieldInt64(fields[1])
+		}
 	case "Link":
-		return f.Link.GetFieldInt64(fields[1])
+		if f.Link != nil {
+			return f.Link.GetFieldInt64(fields[1])
+		}
 	case "Network":
-		return f.Network.GetFieldInt64(fields[1])
+		if f.Network != nil {
+			return f.Network.GetFieldInt64(fields[1])
+		}
 	case "ICMP":
-		return f.ICMP.GetFieldInt64(fields[1])
+		if f.ICMP != nil {
+			return f.ICMP.GetFieldInt64(fields[1])
+		}
 	case "Transport":
-		return f.Transport.GetFieldInt64(fields[1])
+		if f.Transport != nil {
+			return f.Transport.GetFieldInt64(fields[1])
+		}
 	case "RawPacketsCaptured":
 		return f.RawPacketsCaptured, nil
 	}
@@ -1404,6 +1410,30 @@ func (f *Flow) GetField(field string) (interface{}, error) {
 // GetFieldKeys returns the list of valid field of a Flow
 func (f *Flow) GetFieldKeys() []string {
 	return flowFieldKeys
+}
+
+// MatchBool implements the Getter interface
+func (f *Flow) MatchBool(key string, predicate common.BoolPredicate) bool {
+	if b, err := f.GetFieldBool(key); err == nil {
+		return predicate(b)
+	}
+	return false
+}
+
+// MatchInt64 implements the Getter interface
+func (f *Flow) MatchInt64(key string, predicate common.Int64Predicate) bool {
+	if i, err := f.GetFieldInt64(key); err == nil {
+		return predicate(i)
+	}
+	return false
+}
+
+// MatchString implements the Getter interface
+func (f *Flow) MatchString(key string, predicate common.StringPredicate) bool {
+	if s, err := f.GetFieldString(key); err == nil {
+		return predicate(s)
+	}
+	return false
 }
 
 var flowFieldKeys []string

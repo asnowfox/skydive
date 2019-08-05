@@ -97,18 +97,21 @@ func execTraversalQuery(t *testing.T, tc *fakeTableClient, query string) travers
 	return res
 }
 
-func newTable(nodeID string) *flow.Table {
-	updHandler := flow.NewFlowHandler(func(f *flow.FlowArray) {}, time.Second)
-	expHandler := flow.NewFlowHandler(func(f *flow.FlowArray) {}, 300*time.Second)
-
-	return flow.NewTable(updHandler, expHandler, "", flow.TableOpts{})
+type fakeMessageSender struct {
 }
 
-func newFakeTableClient() *fakeTableClient {
+func (f *fakeMessageSender) SendFlows(flows []*flow.Flow) {
+}
+
+func newTable(nodeID string) *flow.Table {
+	return flow.NewTable(time.Second, time.Hour, &fakeMessageSender{}, flow.UUIDs{NodeTID: nodeID}, flow.TableOpts{})
+}
+
+func newFakeTableClient(nodeID string) *fakeTableClient {
 	b, _ := graph.NewMemoryBackend()
 
 	tc := &fakeTableClient{
-		t: newTable(""),
+		t: newTable(nodeID),
 		g: graph.NewGraph("", b, common.AnalyzerService),
 	}
 
@@ -123,17 +126,17 @@ func newICMPFlow(id uint32) *flow.Flow {
 	return icmp
 }
 
-func TestHasStep(t *testing.T) {
-	tc := newFakeTableClient()
+func TestHasStepOp(t *testing.T) {
+	tc := newFakeTableClient("node1")
 
-	_, flowChan := tc.t.Start()
+	_, _, flowChan := tc.t.Start()
 	defer tc.t.Stop()
 	for tc.t.State() != common.RunningState {
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	flowChan <- &flow.Operation{Type: flow.ReplaceOperation, Flow: newICMPFlow(222), Key: strconv.Itoa(rand.Int())}
-	flowChan <- &flow.Operation{Type: flow.ReplaceOperation, Flow: newICMPFlow(444), Key: strconv.Itoa(rand.Int())}
+	flowChan <- &flow.Operation{Type: flow.ReplaceOperation, Flow: newICMPFlow(222), Key: rand.Uint64()}
+	flowChan <- &flow.Operation{Type: flow.ReplaceOperation, Flow: newICMPFlow(444), Key: rand.Uint64()}
 
 	time.Sleep(time.Second)
 
@@ -180,17 +183,17 @@ func TestHasStep(t *testing.T) {
 	}
 }
 
-func TestLimitStep(t *testing.T) {
-	tc := newFakeTableClient()
+func TestLimitStepOp(t *testing.T) {
+	tc := newFakeTableClient("node1")
 
-	_, flowChan := tc.t.Start()
+	_, _, flowChan := tc.t.Start()
 	defer tc.t.Stop()
 	for tc.t.State() != common.RunningState {
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	flowChan <- &flow.Operation{Type: flow.ReplaceOperation, Flow: newICMPFlow(222), Key: strconv.Itoa(rand.Int())}
-	flowChan <- &flow.Operation{Type: flow.ReplaceOperation, Flow: newICMPFlow(444), Key: strconv.Itoa(rand.Int())}
+	flowChan <- &flow.Operation{Type: flow.ReplaceOperation, Flow: newICMPFlow(222), Key: rand.Uint64()}
+	flowChan <- &flow.Operation{Type: flow.ReplaceOperation, Flow: newICMPFlow(444), Key: rand.Uint64()}
 
 	time.Sleep(time.Second)
 
@@ -207,17 +210,17 @@ func TestLimitStep(t *testing.T) {
 	}
 }
 
-func TestDedupStep(t *testing.T) {
-	tc := newFakeTableClient()
+func TestDedupStepOp(t *testing.T) {
+	tc := newFakeTableClient("node1")
 
-	_, flowChan := tc.t.Start()
+	_, _, flowChan := tc.t.Start()
 	defer tc.t.Stop()
 	for tc.t.State() != common.RunningState {
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	flowChan <- &flow.Operation{Type: flow.ReplaceOperation, Flow: newICMPFlow(222), Key: strconv.Itoa(rand.Int())}
-	flowChan <- &flow.Operation{Type: flow.ReplaceOperation, Flow: newICMPFlow(222), Key: strconv.Itoa(rand.Int())}
+	flowChan <- &flow.Operation{Type: flow.ReplaceOperation, Flow: newICMPFlow(222), Key: rand.Uint64()}
+	flowChan <- &flow.Operation{Type: flow.ReplaceOperation, Flow: newICMPFlow(222), Key: rand.Uint64()}
 
 	time.Sleep(time.Second)
 
@@ -240,14 +243,14 @@ func TestDedupStep(t *testing.T) {
 	}
 }
 
-func TestCaptureNodeStep(t *testing.T) {
-	tc := newFakeTableClient()
+func TestCaptureNodeStepOp(t *testing.T) {
+	tc := newFakeTableClient("node1")
 
 	tc.g.NewNode(graph.GenID(), graph.Metadata{"TID": "123"})
 	tc.g.NewNode(graph.GenID(), graph.Metadata{"TID": "456"})
 	tc.g.NewNode(graph.GenID(), graph.Metadata{"TID": "789"})
 
-	_, flowChan := tc.t.Start()
+	_, _, flowChan := tc.t.Start()
 	defer tc.t.Stop()
 	for tc.t.State() != common.RunningState {
 		time.Sleep(100 * time.Millisecond)
@@ -255,11 +258,11 @@ func TestCaptureNodeStep(t *testing.T) {
 
 	icmp := newICMPFlow(222)
 	icmp.NodeTID = "123"
-	flowChan <- &flow.Operation{Type: flow.ReplaceOperation, Flow: icmp, Key: strconv.Itoa(rand.Int())}
+	flowChan <- &flow.Operation{Type: flow.ReplaceOperation, Flow: icmp, Key: rand.Uint64()}
 
 	icmp = newICMPFlow(444)
 	icmp.NodeTID = "456"
-	flowChan <- &flow.Operation{Type: flow.ReplaceOperation, Flow: icmp, Key: strconv.Itoa(rand.Int())}
+	flowChan <- &flow.Operation{Type: flow.ReplaceOperation, Flow: icmp, Key: rand.Uint64()}
 
 	time.Sleep(time.Second)
 
@@ -288,14 +291,14 @@ func TestCaptureNodeStep(t *testing.T) {
 	}
 }
 
-func TestInStep(t *testing.T) {
-	tc := newFakeTableClient()
+func TestInStepOp(t *testing.T) {
+	tc := newFakeTableClient("node1")
 
 	tc.g.NewNode(graph.GenID(), graph.Metadata{"MAC": "123"})
 	tc.g.NewNode(graph.GenID(), graph.Metadata{"MAC": "456"})
 	tc.g.NewNode(graph.GenID(), graph.Metadata{"MAC": "789"})
 
-	_, flowChan := tc.t.Start()
+	_, _, flowChan := tc.t.Start()
 	defer tc.t.Stop()
 	for tc.t.State() != common.RunningState {
 		time.Sleep(100 * time.Millisecond)
@@ -303,15 +306,15 @@ func TestInStep(t *testing.T) {
 
 	icmp := newICMPFlow(222)
 	icmp.Link = &flow.FlowLayer{A: "123"}
-	flowChan <- &flow.Operation{Type: flow.ReplaceOperation, Flow: icmp, Key: strconv.Itoa(rand.Int())}
+	flowChan <- &flow.Operation{Type: flow.ReplaceOperation, Flow: icmp, Key: rand.Uint64()}
 
 	icmp = newICMPFlow(444)
 	icmp.Link = &flow.FlowLayer{A: "456"}
-	flowChan <- &flow.Operation{Type: flow.ReplaceOperation, Flow: icmp, Key: strconv.Itoa(rand.Int())}
+	flowChan <- &flow.Operation{Type: flow.ReplaceOperation, Flow: icmp, Key: rand.Uint64()}
 
 	icmp = newICMPFlow(666)
 	icmp.Link = &flow.FlowLayer{A: "123"}
-	flowChan <- &flow.Operation{Type: flow.ReplaceOperation, Flow: icmp, Key: strconv.Itoa(rand.Int())}
+	flowChan <- &flow.Operation{Type: flow.ReplaceOperation, Flow: icmp, Key: rand.Uint64()}
 
 	time.Sleep(time.Second)
 
@@ -334,14 +337,14 @@ func TestInStep(t *testing.T) {
 	}
 }
 
-func TestOutStep(t *testing.T) {
-	tc := newFakeTableClient()
+func TestOutStepOp(t *testing.T) {
+	tc := newFakeTableClient("node1")
 
 	tc.g.NewNode(graph.GenID(), graph.Metadata{"MAC": "123"})
 	tc.g.NewNode(graph.GenID(), graph.Metadata{"PeerIntfMAC": "456"})
 	tc.g.NewNode(graph.GenID(), graph.Metadata{"MAC": "789"})
 
-	_, flowChan := tc.t.Start()
+	_, _, flowChan := tc.t.Start()
 	defer tc.t.Stop()
 	for tc.t.State() != common.RunningState {
 		time.Sleep(100 * time.Millisecond)
@@ -349,15 +352,15 @@ func TestOutStep(t *testing.T) {
 
 	icmp := newICMPFlow(222)
 	icmp.Link = &flow.FlowLayer{B: "123"}
-	flowChan <- &flow.Operation{Type: flow.ReplaceOperation, Flow: icmp, Key: strconv.Itoa(rand.Int())}
+	flowChan <- &flow.Operation{Type: flow.ReplaceOperation, Flow: icmp, Key: rand.Uint64()}
 
 	icmp = newICMPFlow(444)
 	icmp.Link = &flow.FlowLayer{B: "456"}
-	flowChan <- &flow.Operation{Type: flow.ReplaceOperation, Flow: icmp, Key: strconv.Itoa(rand.Int())}
+	flowChan <- &flow.Operation{Type: flow.ReplaceOperation, Flow: icmp, Key: rand.Uint64()}
 
 	icmp = newICMPFlow(666)
 	icmp.Link = &flow.FlowLayer{B: "123"}
-	flowChan <- &flow.Operation{Type: flow.ReplaceOperation, Flow: icmp, Key: strconv.Itoa(rand.Int())}
+	flowChan <- &flow.Operation{Type: flow.ReplaceOperation, Flow: icmp, Key: rand.Uint64()}
 
 	time.Sleep(time.Second)
 
@@ -380,14 +383,14 @@ func TestOutStep(t *testing.T) {
 	}
 }
 
-func TestBothStep(t *testing.T) {
-	tc := newFakeTableClient()
+func TestBothStepOp(t *testing.T) {
+	tc := newFakeTableClient("node1")
 
 	tc.g.NewNode(graph.GenID(), graph.Metadata{"MAC": "123"})
 	tc.g.NewNode(graph.GenID(), graph.Metadata{"PeerIntfMAC": "456"})
 	tc.g.NewNode(graph.GenID(), graph.Metadata{"MAC": "789"})
 
-	_, flowChan := tc.t.Start()
+	_, _, flowChan := tc.t.Start()
 	defer tc.t.Stop()
 	for tc.t.State() != common.RunningState {
 		time.Sleep(100 * time.Millisecond)
@@ -395,15 +398,15 @@ func TestBothStep(t *testing.T) {
 
 	icmp := newICMPFlow(222)
 	icmp.Link = &flow.FlowLayer{A: "123"}
-	flowChan <- &flow.Operation{Type: flow.ReplaceOperation, Flow: icmp, Key: strconv.Itoa(rand.Int())}
+	flowChan <- &flow.Operation{Type: flow.ReplaceOperation, Flow: icmp, Key: rand.Uint64()}
 
 	icmp = newICMPFlow(444)
 	icmp.Link = &flow.FlowLayer{B: "456"}
-	flowChan <- &flow.Operation{Type: flow.ReplaceOperation, Flow: icmp, Key: strconv.Itoa(rand.Int())}
+	flowChan <- &flow.Operation{Type: flow.ReplaceOperation, Flow: icmp, Key: rand.Uint64()}
 
 	icmp = newICMPFlow(666)
 	icmp.Link = &flow.FlowLayer{B: "123"}
-	flowChan <- &flow.Operation{Type: flow.ReplaceOperation, Flow: icmp, Key: strconv.Itoa(rand.Int())}
+	flowChan <- &flow.Operation{Type: flow.ReplaceOperation, Flow: icmp, Key: rand.Uint64()}
 
 	time.Sleep(time.Second)
 

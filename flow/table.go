@@ -20,12 +20,12 @@ package flow
 import (
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 
+	"github.com/hashicorp/golang-lru/simplelru"
 	"github.com/skydive-project/skydive/common"
 	"github.com/skydive-project/skydive/config"
 	"github.com/skydive-project/skydive/filters"
@@ -34,23 +34,6 @@ import (
 
 // HoldTimeoutMilliseconds is the number of milliseconds for holding ended flows before they get deleted from the flow table
 const HoldTimeoutMilliseconds = int64(time.Duration(15) * time.Second / time.Millisecond)
-
-// ExpireUpdateFunc defines expire and updates callback
-type ExpireUpdateFunc func(f *FlowArray)
-
-// Handler defines a flow callback called every time
-type Handler struct {
-	callback ExpireUpdateFunc
-	every    time.Duration
-}
-
-// NewFlowHandler creates a flow callback handler that will be asynchronously called every time
-func NewFlowHandler(callback ExpireUpdateFunc, every time.Duration) *Handler {
-	return &Handler{
-		callback: callback,
-		every:    every,
-	}
-}
 
 // TableOpts defines flow table options
 type TableOpts struct {
@@ -62,31 +45,40 @@ type TableOpts struct {
 	ExtraLayers    ExtraLayers
 }
 
+// UUIDs describes UUIDs that can be applied to flows table wise
+type UUIDs struct {
+	NodeTID   string
+	CaptureID string
+}
+
 // Table store the flow table and related metrics mechanism
 type Table struct {
 	Opts              TableOpts
 	packetSeqChan     chan *PacketSequence
 	flowChanOperation chan *Operation
-	table             map[string]*Flow
+	flowEBPFChan      chan *EBPFFlow
+	table             *simplelru.LRU
 	flush             chan bool
 	flushDone         chan bool
 	query             chan *TableQuery
 	reply             chan []byte
-	state             int64
+	state             common.ServiceState
 	lockState         common.RWMutex
 	wg                sync.WaitGroup
 	quit              chan bool
-	updateHandler     *Handler
+	updateEvery       time.Duration
+	expireAfter       time.Duration
+	sender            Sender
 	lastUpdate        int64
 	updateVersion     int64
-	expireHandler     *Handler
 	lastExpire        int64
-	nodeTID           string
 	ipDefragger       *IPDefragger
 	tcpAssembler      *TCPAssembler
-	flowOpts          Opts
+	opts              Opts
 	appPortMap        *ApplicationPortMap
 	appTimeout        map[string]int64
+	removedFlows      int
+	uuids             UUIDs
 }
 
 // OperationType operation type of a Flow in a flow table
@@ -101,9 +93,14 @@ const (
 
 // Operation describes a flow operation
 type Operation struct {
-	Key  string
+	Key  uint64
 	Flow *Flow
 	Type OperationType
+}
+
+// Sender defines a flows sender interface
+type Sender interface {
+	SendFlows(flows []*Flow)
 }
 
 func updateTCPFlagTime(prevFlagTime int64, currFlagTime int64) int64 {
@@ -114,26 +111,26 @@ func updateTCPFlagTime(prevFlagTime int64, currFlagTime int64) int64 {
 }
 
 // NewTable creates a new flow table
-func NewTable(updateHandler *Handler, expireHandler *Handler, nodeTID string, opts ...TableOpts) *Table {
+func NewTable(updateEvery, expireAfter time.Duration, sender Sender, uuids UUIDs, opts ...TableOpts) *Table {
 	appTimeout := make(map[string]int64)
 	for key := range config.GetConfig().GetStringMap("flow.application_timeout") {
 		// convert seconds to milleseconds
 		appTimeout[strings.ToUpper(key)] = int64(1000 * config.GetConfig().GetInt("flow.application_timeout."+key))
 	}
-
+	LRU, _ := simplelru.NewLRU(config.GetConfig().GetInt("flow.max_entries"), nil)
 	t := &Table{
 		packetSeqChan:     make(chan *PacketSequence, 1000),
 		flowChanOperation: make(chan *Operation, 1000),
-		table:             make(map[string]*Flow),
+		flowEBPFChan:      make(chan *EBPFFlow, 1000),
+		table:             LRU,
 		flush:             make(chan bool),
 		flushDone:         make(chan bool),
 		state:             common.StoppedState,
 		quit:              make(chan bool),
-		updateHandler:     updateHandler,
-		expireHandler:     expireHandler,
-		nodeTID:           nodeTID,
-		ipDefragger:       NewIPDefragger(),
-		tcpAssembler:      NewTCPAssembler(),
+		updateEvery:       updateEvery,
+		expireAfter:       expireAfter,
+		sender:            sender,
+		uuids:             uuids,
 		appPortMap:        NewApplicationPortMapFromConfig(),
 		appTimeout:        appTimeout,
 	}
@@ -141,7 +138,7 @@ func NewTable(updateHandler *Handler, expireHandler *Handler, nodeTID string, op
 		t.Opts = opts[0]
 	}
 
-	t.flowOpts = Opts{
+	t.opts = Opts{
 		TCPMetric:    t.Opts.ExtraTCPMetric,
 		IPDefrag:     t.Opts.IPDefrag,
 		LayerKeyMode: t.Opts.LayerKeyMode,
@@ -149,13 +146,23 @@ func NewTable(updateHandler *Handler, expireHandler *Handler, nodeTID string, op
 		ExtraLayers:  t.Opts.ExtraLayers,
 	}
 
-	t.updateVersion = 0
+	if t.Opts.IPDefrag {
+		t.ipDefragger = NewIPDefragger()
+	}
+
+	if t.Opts.ReassembleTCP {
+		t.tcpAssembler = NewTCPAssembler()
+	}
+
 	return t
 }
 
 func (ft *Table) getFlows(query *filters.SearchQuery) *FlowSet {
 	flowset := NewFlowSet()
-	for _, f := range ft.table {
+	keys := ft.table.Keys()
+	for _, k := range keys {
+		fl, _ := ft.table.Peek(k)
+		f := fl.(*Flow)
 		if query == nil || query.Filter == nil || query.Filter.Eval(f) {
 			if flowset.Start == 0 || flowset.Start > f.Start {
 				flowset.Start = f.Start
@@ -186,28 +193,36 @@ func (ft *Table) getFlows(query *filters.SearchQuery) *FlowSet {
 	return flowset
 }
 
-func (ft *Table) getOrCreateFlow(key string) (*Flow, bool) {
-	if flow, found := ft.table[key]; found {
-		return flow, false
+func (ft *Table) getOrCreateFlow(key uint64) (*Flow, bool) {
+	if flow, found := ft.table.Get(key); found {
+		return flow.(*Flow), false
 	}
 
 	new := NewFlow()
-	ft.table[key] = new
-
+	if ft.table.Add(key, new) {
+		ft.removedFlows++
+	}
 	return new, true
 }
 
-func (ft *Table) replaceFlow(key string, f *Flow) *Flow {
-	prev, _ := ft.table[key]
-	ft.table[key] = f
-
-	return prev
+func (ft *Table) replaceFlow(key uint64, f *Flow) *Flow {
+	prev, _ := ft.table.Get(key)
+	if ft.table.Add(key, f) {
+		ft.removedFlows++
+	}
+	if prev == nil {
+		return nil
+	}
+	return prev.(*Flow)
 }
 
 func (ft *Table) expire(expireBefore int64) {
 	var expiredFlows []*Flow
-	flowTableSzBefore := len(ft.table)
-	for k, f := range ft.table {
+	flowTableSzBefore := ft.table.Len()
+	keys := ft.table.Keys()
+	for _, k := range keys {
+		fl, _ := ft.table.Peek(k)
+		f := fl.(*Flow)
 		if f.Last < expireBefore {
 			duration := time.Duration(f.Last - f.Start)
 			if f.XXX_state.updateVersion > ft.updateVersion {
@@ -221,14 +236,14 @@ func (ft *Table) expire(expireBefore int64) {
 			}
 
 			// need to use the key as the key could be not equal to the UUID
-			delete(ft.table, k)
+			ft.table.Remove(k)
 		}
 	}
 
 	/* Advise Clients */
-	ft.expireHandler.callback(&FlowArray{Flows: expiredFlows})
+	ft.sender.SendFlows(expiredFlows)
 
-	flowTableSz := len(ft.table)
+	flowTableSz := ft.table.Len()
 	logging.GetLogger().Debugf("Expire Flow : removed %v ; new size %v", flowTableSzBefore-flowTableSz, flowTableSz)
 }
 
@@ -242,25 +257,15 @@ func (ft *Table) updateAt(now time.Time) {
 func (ft *Table) updateMetric(f *Flow, start, last int64) {
 	if f.LastUpdateMetric == nil {
 		f.LastUpdateMetric = &FlowMetric{}
-	}
-	f.LastUpdateMetric.ABPackets = f.Metric.ABPackets
-	f.LastUpdateMetric.ABBytes = f.Metric.ABBytes
-	f.LastUpdateMetric.BAPackets = f.Metric.BAPackets
-	f.LastUpdateMetric.BABytes = f.Metric.BABytes
-	f.LastUpdateMetric.RTT = f.Metric.RTT
-
-	// subtract previous values to get the diff so that we store the
-	// amount of data between two updates
-	if lm := f.XXX_state.lastMetric; lm != nil {
-		f.LastUpdateMetric.ABPackets -= lm.ABPackets
-		f.LastUpdateMetric.ABBytes -= lm.ABBytes
-		f.LastUpdateMetric.BAPackets -= lm.BAPackets
-		f.LastUpdateMetric.BABytes -= lm.BABytes
-		f.LastUpdateMetric.Start = start
-	} else {
-		f.LastUpdateMetric.Start = f.Start
+		start = f.Start
 	}
 
+	*f.LastUpdateMetric = *f.Metric
+	f.LastUpdateMetric.ABPackets -= f.XXX_state.lastMetric.ABPackets
+	f.LastUpdateMetric.ABBytes -= f.XXX_state.lastMetric.ABBytes
+	f.LastUpdateMetric.BAPackets -= f.XXX_state.lastMetric.BAPackets
+	f.LastUpdateMetric.BABytes -= f.XXX_state.lastMetric.BABytes
+	f.LastUpdateMetric.Start = start
 	f.LastUpdateMetric.Last = last
 }
 
@@ -268,28 +273,37 @@ func (ft *Table) update(updateFrom, updateTime int64) {
 	logging.GetLogger().Debugf("flow table update: %d, %d", updateFrom, updateTime)
 
 	var updatedFlows []*Flow
-	for k, f := range ft.table {
+	for _, k := range ft.table.Keys() {
+		fl, _ := ft.table.Peek(k)
+		f := fl.(*Flow)
 		if f.XXX_state.updateVersion > ft.updateVersion {
 			ft.updateMetric(f, updateFrom, updateTime)
 			updatedFlows = append(updatedFlows, f)
 		} else if updateTime-f.Last > ft.appTimeout[f.Application] && ft.appTimeout[f.Application] > 0 {
 			updatedFlows = append(updatedFlows, f)
 			f.FinishType = FlowFinishType_TIMEOUT
-			delete(ft.table, k)
+			ft.table.Remove(k)
+		} else if f.LastUpdateMetric != nil {
+			f.LastUpdateMetric.ABBytes = 0
+			f.LastUpdateMetric.ABPackets = 0
+			f.LastUpdateMetric.BABytes = 0
+			f.LastUpdateMetric.BAPackets = 0
+			f.LastUpdateMetric.Start = updateFrom
+			f.LastUpdateMetric.Last = updateTime
 		} else {
 			f.LastUpdateMetric = &FlowMetric{Start: updateFrom, Last: updateTime}
 		}
 
-		f.XXX_state.lastMetric = f.Metric.Copy()
+		f.XXX_state.lastMetric = *f.Metric
 
 		if f.FinishType != FlowFinishType_NOT_FINISHED && updateTime-f.Last >= HoldTimeoutMilliseconds {
-			delete(ft.table, k)
+			ft.table.Remove(k)
 		}
 	}
 
 	if len(updatedFlows) != 0 {
 		/* Advise Clients */
-		ft.updateHandler.callback(&FlowArray{Flows: updatedFlows})
+		ft.sender.SendFlows(updatedFlows)
 		logging.GetLogger().Debugf("Send updated Flows: %d", len(updatedFlows))
 
 		// cleanup raw packets
@@ -333,7 +347,7 @@ func (ft *Table) Query(query *TableQuery) []byte {
 	ft.lockState.Lock()
 	defer ft.lockState.Unlock()
 
-	if atomic.LoadInt64(&ft.state) == common.RunningState {
+	if ft.state.Load() == common.RunningState {
 		ft.query <- query
 
 		timer := time.NewTicker(1 * time.Second)
@@ -344,7 +358,7 @@ func (ft *Table) Query(query *TableQuery) []byte {
 			case r := <-ft.reply:
 				return r
 			case <-timer.C:
-				if atomic.LoadInt64(&ft.state) != common.RunningState {
+				if ft.state.Load() != common.RunningState {
 					return nil
 				}
 			}
@@ -354,20 +368,16 @@ func (ft *Table) Query(query *TableQuery) []byte {
 }
 
 func (ft *Table) packetToFlow(packet *Packet, parentUUID string) *Flow {
-	key := packet.Key(parentUUID, ft.flowOpts)
+	key, l2Key, l3Key := packet.Keys(parentUUID, &ft.uuids, &ft.opts)
 	flow, new := ft.getOrCreateFlow(key)
 	if new {
-		uuids := UUIDs{
-			ParentUUID: parentUUID,
-		}
-
 		if ft.Opts.ReassembleTCP {
 			if layer := packet.GoPacket.TransportLayer(); layer != nil && layer.LayerType() == layers.LayerTypeTCP {
 				ft.tcpAssembler.RegisterFlow(flow, packet.GoPacket)
 			}
 		}
 
-		flow.initFromPacket(key, packet, ft.nodeTID, uuids, ft.flowOpts)
+		flow.initFromPacket(key, l2Key, l3Key, packet, parentUUID, &ft.uuids, &ft.opts)
 	} else {
 		if ft.Opts.ReassembleTCP {
 			if layer := packet.GoPacket.TransportLayer(); layer != nil && layer.LayerType() == layers.LayerTypeTCP {
@@ -375,17 +385,22 @@ func (ft *Table) packetToFlow(packet *Packet, parentUUID string) *Flow {
 			}
 		}
 
-		flow.Update(packet, ft.flowOpts)
+		flow.Update(packet, &ft.opts)
 	}
 
+	/* we need to reset state here to avoid re-using underlayer in tunnel */
+	flow.XXX_state.ipv4 = nil
+	flow.XXX_state.ipv6 = nil
 	flow.XXX_state.updateVersion = ft.updateVersion + 1
 
 	if ft.Opts.RawPacketLimit != 0 && flow.RawPacketsCaptured < ft.Opts.RawPacketLimit {
 		flow.RawPacketsCaptured++
+		linkType, _ := flow.LinkType()
 		data := &RawPacket{
 			Timestamp: common.UnixMillis(packet.GoPacket.Metadata().CaptureInfo.Timestamp),
 			Index:     flow.RawPacketsCaptured,
 			Data:      packet.Data,
+			LinkType:  linkType,
 		}
 		flow.LastRawPackets = append(flow.LastRawPackets, data)
 	}
@@ -395,7 +410,7 @@ func (ft *Table) packetToFlow(packet *Packet, parentUUID string) *Flow {
 
 func (ft *Table) processPacketSeq(ps *PacketSequence) {
 	var parentUUID string
-	logging.GetLogger().Debugf("%d Packets received for capture node %s", len(ps.Packets), ft.nodeTID)
+	logging.GetLogger().Debugf("%d Packets received for capture node %s", len(ps.Packets), ft.uuids.NodeTID)
 	for _, packet := range ps.Packets {
 		f := ft.packetToFlow(packet, parentUUID)
 		parentUUID = f.UUID
@@ -415,11 +430,12 @@ func (ft *Table) processFlowOP(op *Operation) {
 			fl.XXX_state.updateVersion = ft.updateVersion + 1
 		}
 	case UpdateOperation:
-		fl := ft.table[op.Key]
-		if fl == nil {
+		flo, found := ft.table.Get(op.Key)
+		if !found {
 			return
 		}
 
+		fl := flo.(*Flow)
 		fl.Metric.ABBytes += op.Flow.Metric.ABBytes
 		fl.Metric.BABytes += op.Flow.Metric.BABytes
 		fl.Metric.ABPackets += op.Flow.Metric.ABPackets
@@ -445,9 +461,29 @@ func (ft *Table) processFlowOP(op *Operation) {
 	}
 }
 
+func (ft *Table) processEBPFFlow(ebpfFlow *EBPFFlow) {
+	key := kernFlowKey(ebpfFlow.KernFlow)
+	f, found := ft.table.Get(key)
+	if !found {
+		keys, flows, err := ft.newFlowFromEBPF(ebpfFlow, key)
+		if err != nil {
+			logging.GetLogger().Debugf("eBPF flow parsing error: %s", err)
+			return
+		}
+
+		for i := range keys {
+			if ft.table.Add(keys[i], flows[i]) {
+				ft.removedFlows++
+			}
+		}
+		return
+	}
+	ft.updateFlowFromEBPF(ebpfFlow, f.(*Flow))
+}
+
 // State returns the state of the flow table, stopped, running...
-func (ft *Table) State() int64 {
-	return atomic.LoadInt64(&ft.state)
+func (ft *Table) State() common.ServiceState {
+	return ft.state.Load()
 }
 
 // Run background jobs, like update/expire entries event
@@ -455,10 +491,10 @@ func (ft *Table) Run() {
 	ft.wg.Add(1)
 	defer ft.wg.Done()
 
-	updateTicker := time.NewTicker(ft.updateHandler.every)
+	updateTicker := time.NewTicker(ft.updateEvery)
 	defer updateTicker.Stop()
 
-	expireTicker := time.NewTicker(ft.expireHandler.every)
+	expireTicker := time.NewTicker(ft.expireAfter)
 	defer expireTicker.Stop()
 
 	// ticker used internally to track fragment and tcp connections
@@ -470,10 +506,13 @@ func (ft *Table) Run() {
 	nowTicker := time.NewTicker(time.Second * 1)
 	defer nowTicker.Stop()
 
+	overFlowTicker := time.NewTicker(time.Second * 10)
+	defer overFlowTicker.Stop()
+
 	ft.query = make(chan *TableQuery, 100)
 	ft.reply = make(chan []byte, 100)
 
-	atomic.StoreInt64(&ft.state, common.RunningState)
+	ft.state.Store(common.RunningState)
 	for {
 		select {
 		case <-ft.quit:
@@ -483,7 +522,9 @@ func (ft *Table) Run() {
 		case now := <-updateTicker.C:
 			ft.updateAt(now)
 		case <-ft.flush:
-			ft.tcpAssembler.FlushAll()
+			if ft.Opts.ReassembleTCP {
+				ft.tcpAssembler.FlushAll()
+			}
 
 			ft.expireNow()
 			ft.flushDone <- true
@@ -495,10 +536,21 @@ func (ft *Table) Run() {
 			ft.processPacketSeq(ps)
 		case op := <-ft.flowChanOperation:
 			ft.processFlowOP(op)
+		case ebpfFlow := <-ft.flowEBPFChan:
+			ft.processEBPFFlow(ebpfFlow)
 		case now := <-ctTicker.C:
 			t := now.Add(-ctDuration)
-			ft.tcpAssembler.FlushOlderThan(t)
-			ft.ipDefragger.FlushOlderThan(t)
+			if ft.tcpAssembler != nil {
+				ft.tcpAssembler.FlushOlderThan(t)
+			}
+			if ft.ipDefragger != nil {
+				ft.ipDefragger.FlushOlderThan(t)
+			}
+		case <-overFlowTicker.C:
+			if ft.removedFlows > 0 {
+				logging.GetLogger().Warningf("flow table overflow, %d flows were dropped from userspace table", ft.removedFlows)
+				ft.removedFlows = 0
+			}
 		}
 	}
 }
@@ -526,9 +578,9 @@ func (ft *Table) FeedWithSFlowSample(sample *layers.SFlowFlowSample, bpf *BPF) {
 }
 
 // Start the flow table
-func (ft *Table) Start() (chan *PacketSequence, chan *Operation) {
+func (ft *Table) Start() (chan *PacketSequence, chan *EBPFFlow, chan *Operation) {
 	go ft.Run()
-	return ft.packetSeqChan, ft.flowChanOperation
+	return ft.packetSeqChan, ft.flowEBPFChan, ft.flowChanOperation
 }
 
 // Stop the flow table
@@ -536,7 +588,7 @@ func (ft *Table) Stop() {
 	ft.lockState.Lock()
 	defer ft.lockState.Unlock()
 
-	if atomic.CompareAndSwapInt64(&ft.state, common.RunningState, common.StoppingState) {
+	if ft.state.CompareAndSwap(common.RunningState, common.StoppingState) {
 		ft.quit <- true
 		ft.wg.Wait()
 
@@ -553,8 +605,14 @@ func (ft *Table) Stop() {
 			ft.processFlowOP(op)
 		}
 
+		for len(ft.flowEBPFChan) != 0 {
+			ebpfFlow := <-ft.flowEBPFChan
+			ft.processEBPFFlow(ebpfFlow)
+		}
+
 		close(ft.packetSeqChan)
 		close(ft.flowChanOperation)
+		close(ft.flowEBPFChan)
 	}
 
 	ft.expireNow()

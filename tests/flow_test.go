@@ -30,6 +30,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/skydive-project/skydive/flow/probes"
+
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/pcapgo"
 	gclient "github.com/skydive-project/skydive/api/client"
@@ -39,6 +41,24 @@ import (
 	g "github.com/skydive-project/skydive/gremlin"
 	"github.com/skydive-project/skydive/logging"
 )
+
+// ipv6Supported returns true if the platform support IPv6
+func ipv6Supported() bool {
+	if _, err := os.Stat("/proc/net/if_inet6"); os.IsNotExist(err) {
+		return false
+	}
+
+	data, err := ioutil.ReadFile("/proc/sys/net/ipv6/conf/all/disable_ipv6")
+	if err != nil {
+		return false
+	}
+
+	if strings.TrimSpace(string(data)) == "1" {
+		return false
+	}
+
+	return true
+}
 
 func TestSFlowProbeNode(t *testing.T) {
 	test := &Test{
@@ -728,7 +748,7 @@ func TestFlowMetricsStep(t *testing.T) {
 				var start int64
 				for _, metricsOfID := range metrics {
 					if len(metricsOfID) <= 1 {
-						return fmt.Errorf("metric array should have more that 1 element (%+v)", metricsOfID)
+						return fmt.Errorf("Metric array should have more than 1 element (%+v)", metricsOfID)
 					}
 
 					for _, m := range metricsOfID {
@@ -839,10 +859,8 @@ func TestFlowHops(t *testing.T) {
 			}
 
 			found := false
-			m := nodes[0].Metadata
 			for _, n := range tnodes {
-				if n.MatchMetadata(m) == true {
-					found = true
+				if found = n.ID == nodes[0].ID; found {
 					break
 				}
 			}
@@ -858,7 +876,7 @@ func TestFlowHops(t *testing.T) {
 }
 
 func TestIPv6FlowHopsIPv6(t *testing.T) {
-	if !common.IPv6Supported() {
+	if !ipv6Supported() {
 		t.Skipf("Platform doesn't support IPv6")
 	}
 
@@ -949,9 +967,8 @@ func TestIPv6FlowHopsIPv6(t *testing.T) {
 			}
 
 			found := false
-			m := nodes[0].Metadata
 			for _, n := range tnodes {
-				if n.MatchMetadata(m) == true {
+				if n.ID == nodes[0].ID {
 					found = true
 					break
 				}
@@ -968,7 +985,7 @@ func TestIPv6FlowHopsIPv6(t *testing.T) {
 }
 
 func TestICMP(t *testing.T) {
-	if !common.IPv6Supported() {
+	if !ipv6Supported() {
 		t.Skipf("Platform doesn't support IPv6")
 	}
 
@@ -1023,8 +1040,6 @@ func TestICMP(t *testing.T) {
 		// since the agent update ticker is about 10 sec according to the configuration
 		// we should wait 11 sec to have the first update and the MetricRange filled
 		checks: []CheckFunction{func(c *CheckContext) error {
-			ipv4TrackingID := c.injections[0].TrackingID
-			ipv6TrackingID := c.injections[1].TrackingID
 			prefix := c.gremlin.V().Has("Name", "br-icmp", "Type", "ovsbridge")
 
 			gremlin := prefix.Flows().Has("LayersPath", "Ethernet/IPv4/ICMPv4", "ICMP.ID", 123)
@@ -1037,6 +1052,7 @@ func TestICMP(t *testing.T) {
 				return fmt.Errorf("We should receive one ICMPv4 flow with ID 123, got %s", flowsToString(icmpFlows))
 			}
 
+			ipv4TrackingID := icmpFlows[0].TrackingID
 			gremlin = prefix.Flows().Has("TrackingID", ipv4TrackingID)
 			icmpFlows, err = c.gh.GetFlows(gremlin)
 			if err != nil {
@@ -1057,6 +1073,7 @@ func TestICMP(t *testing.T) {
 				return fmt.Errorf("We should receive one ICMPv6 flow with ID 456, got %s", flowsToString(icmpFlows))
 			}
 
+			ipv6TrackingID := icmpFlows[0].TrackingID
 			gremlin = prefix.Flows().Has("TrackingID", ipv6TrackingID)
 			icmpFlows, err = c.gh.GetFlows(gremlin)
 			if err != nil {
@@ -1099,7 +1116,7 @@ func TestFlowVxlanTunnel(t *testing.T) {
 func TestIPv6FlowGRETunnelIPv6(t *testing.T) {
 	t.Skip("Fedora seems didn't support ip6gre tunnel for the moment")
 
-	if !common.IPv6Supported() {
+	if !ipv6Supported() {
 		t.Skipf("Platform doesn't support IPv6")
 	}
 
@@ -1238,6 +1255,7 @@ func testFlowTunnel(t *testing.T, bridge string, tunnelType string, ipv6 bool, I
 }
 
 func TestReplayCapture(t *testing.T) {
+	var pcapSocket string
 	var capture *types.Capture
 
 	sendPCAPFile := func(filename string, socket string) error {
@@ -1285,17 +1303,25 @@ func TestReplayCapture(t *testing.T) {
 
 		settleFunction: func(c *TestContext) error {
 			capture = c.captures[0]
-			// Wait for the capture to be created and the PCAPSocket attribute to be set
-			c.client.Get("capture", capture.UUID, capture)
-			if capture.PCAPSocket == "" {
-				return fmt.Errorf("Failed to retrieve PCAP socket for capture %s", capture.UUID)
+			n, err := c.gh.GetNode(g.G.V().Has("Captures.ID", capture.UUID))
+			if err != nil {
+				return err
+			}
+
+			field, _ := n.GetField("Captures")
+			captures := field.(*probes.Captures)
+			for _, c := range *captures {
+				if c.PCAPSocket == "" {
+					return fmt.Errorf("Failed to retrieve PCAP socket for capture %s", capture.UUID)
+				}
+				pcapSocket = c.PCAPSocket
 			}
 
 			return nil
 		},
 
 		setupFunction: func(c *TestContext) error {
-			return sendPCAPFile("pcaptraces/eth-ip4-arp-dns-req-http-google.pcap", capture.PCAPSocket)
+			return sendPCAPFile("pcaptraces/eth-ip4-arp-dns-req-http-google.pcap", pcapSocket)
 		},
 
 		tearDownCmds: []Cmd{
@@ -1355,8 +1381,8 @@ func TestPcapInject(t *testing.T) {
 				return err
 			}
 
-			if resp.StatusCode != 200 {
-				return fmt.Errorf("Should get 200 status code, got %d", resp.StatusCode)
+			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+				return fmt.Errorf("Should get 2xx status code, got %d", resp.StatusCode)
 			}
 
 			return nil
@@ -1396,11 +1422,11 @@ func TestFlowVLANSegmentation(t *testing.T) {
 			{"sudo ip netns exec vlan-vm2 ip link add link eth0 name vlan type vlan id 8", true},
 			{"sudo ip netns exec vlan-vm2 ip address add 172.16.0.2/24 dev vlan", true},
 
-			{"sudo ovs-vsctl add-port br-vlan vlan-vm1-eth0", true},
-			{"sudo ovs-vsctl add-port br-vlan vlan-vm2-eth0", true},
-
 			{"sudo ip netns exec vlan-vm1 ip l set vlan up", true},
 			{"sudo ip netns exec vlan-vm2 ip l set vlan up", true},
+
+			{"sudo ovs-vsctl add-port br-vlan vlan-vm1-eth0", true},
+			{"sudo ovs-vsctl add-port br-vlan vlan-vm2-eth0", true},
 		},
 
 		injections: []TestInjection{{
@@ -1981,10 +2007,16 @@ func TestOvsMirror(t *testing.T) {
 				return fmt.Errorf("Unable to find the expected Mirror interface: %s", err)
 			}
 
-			mirrorOf, err := node.GetFieldString("Capture.MirrorOf")
+			field, err := node.GetField("Captures")
 			if err != nil {
 				return err
 			}
+
+			captures, ok := field.(*probes.Captures)
+			if !ok || len(*captures) == 0 {
+				return fmt.Errorf("Failed to retrieve captures on %s", node.ID)
+			}
+			mirrorOf := (*captures)[0].MirrorOf
 
 			if mirrorOf != string(orig.ID) {
 				aa, err := c.gh.GetNode(c.gremlin.V(mirrorOf))
@@ -2068,4 +2100,232 @@ func TestSFlowCapture(t *testing.T) {
 	}
 
 	RunTest(t, test)
+}
+
+func TestERSpanV1Target(t *testing.T) {
+	test := &Test{
+		setupCmds: []Cmd{
+			{"brctl addbr br-erspan", true},
+			{"ip link set br-erspan up", true},
+			{"ip netns add erspan-vm1", true},
+			{"ip link add name erspan-vm1-eth0 type veth peer name eth0 netns erspan-vm1", true},
+			{"ip link set erspan-vm1-eth0 up", true},
+			{"ip netns exec erspan-vm1 ip link set eth0 up", true},
+			{"ip netns exec erspan-vm1 ip address add 169.254.66.68/24 dev eth0", true},
+			{"brctl addif br-erspan erspan-vm1-eth0", true},
+
+			{"ip netns add erspan-vm2", true},
+			{"ip link add name erspan-vm2-eth0 type veth peer name eth0 netns erspan-vm2", true},
+			{"ip link set erspan-vm2-eth0 up", true},
+			{"ip netns exec erspan-vm2 ip link set eth0 up", true},
+			{"ip netns exec erspan-vm2 ip address add 169.254.66.69/24 dev eth0", true},
+			{"brctl addif br-erspan erspan-vm2-eth0", true},
+
+			{"ip netns add erspan-end", true},
+			{"ip link add name erspan-end-eth0 type veth peer name eth0 netns erspan-end", true},
+			{"ip link set erspan-end-eth0 up", true},
+			{"ip address add 169.254.67.1/24 dev erspan-end-eth0", true},
+			{"ip netns exec erspan-end ip link set eth0 up", true},
+			{"ip netns exec erspan-end ip address add 169.254.67.2/24 dev eth0", true},
+		},
+
+		injections: []TestInjection{{
+			from:  g.G.V().Has("Name", "erspan-vm1", "Type", "netns").Out().Has("Name", "eth0"),
+			to:    g.G.V().Has("Name", "erspan-vm2", "Type", "netns").Out().Has("Name", "eth0"),
+			count: 5,
+		}},
+
+		tearDownCmds: []Cmd{
+			{"ip link set br-erspan down", true},
+			{"brctl delbr br-erspan", true},
+			{"ip link del erspan-vm1-eth0", true},
+			{"ip link del erspan-vm2-eth0", true},
+			{"ip link del erspan-end-eth0", true},
+			{"ip netns del erspan-vm1", true},
+			{"ip netns del erspan-vm2", true},
+			{"ip netns del erspan-end", true},
+		},
+
+		captures: []TestCapture{
+			{gremlin: g.G.V().Has("Name", "erspan-vm1-eth0"), target: "169.254.67.2:0", targetType: "erspanv1", bpf: "icmp"},
+			{gremlin: g.G.V().Has("Name", "erspan-end-eth0")},
+		},
+
+		mode: Replay,
+
+		checks: []CheckFunction{func(c *CheckContext) error {
+			flows, err := c.gh.GetFlows(c.gremlin.Flows().Has("Application", "GRE", "Network.B", "169.254.67.2"))
+			if err != nil {
+				return err
+			}
+
+			if len(flows) != 1 || flows[0].Metric.ABPackets != 10 {
+				return fmt.Errorf("Should get 1 gre flow with 10 packets, one per icmp echo/reply, got : %v", flows)
+			}
+
+			return nil
+		}},
+	}
+
+	RunTest(t, test)
+}
+
+func TestNetFlowV5Target(t *testing.T) {
+	test := &Test{
+		setupCmds: []Cmd{
+			{"brctl addbr br-netflow", true},
+			{"ip link set br-netflow up", true},
+			{"ip netns add netflow-vm1", true},
+			{"ip link add name netflo-vm1-eth0 type veth peer name eth0 netns netflow-vm1", true},
+			{"ip link set netflo-vm1-eth0 up", true},
+			{"ip netns exec netflow-vm1 ip link set eth0 up", true},
+			{"ip netns exec netflow-vm1 ip address add 169.254.66.68/24 dev eth0", true},
+			{"brctl addif br-netflow netflo-vm1-eth0", true},
+
+			{"ip netns add netflow-vm2", true},
+			{"ip link add name netflo-vm2-eth0 type veth peer name eth0 netns netflow-vm2", true},
+			{"ip link set netflo-vm2-eth0 up", true},
+			{"ip netns exec netflow-vm2 ip link set eth0 up", true},
+			{"ip netns exec netflow-vm2 ip address add 169.254.66.69/24 dev eth0", true},
+			{"brctl addif br-netflow netflo-vm2-eth0", true},
+
+			{"ip netns add netflow-end", true},
+			{"ip link add name netflo-end-eth0 type veth peer name eth0 netns netflow-end", true},
+			{"ip link set netflo-end-eth0 up", true},
+			{"ip address add 169.254.67.1/24 dev netflo-end-eth0", true},
+			{"ip netns exec netflow-end ip link set eth0 up", true},
+			{"ip netns exec netflow-end ip address add 169.254.67.2/24 dev eth0", true},
+		},
+
+		injections: []TestInjection{{
+			from:  g.G.V().Has("Name", "netflow-vm1", "Type", "netns").Out().Has("Name", "eth0"),
+			to:    g.G.V().Has("Name", "netflow-vm2", "Type", "netns").Out().Has("Name", "eth0"),
+			count: 5,
+		}},
+
+		tearDownCmds: []Cmd{
+			{"ip link set br-netflow down", true},
+			{"brctl delbr br-netflow", true},
+			{"ip link del netflo-vm1-eth0", true},
+			{"ip link del netflo-vm2-eth0", true},
+			{"ip link del netflo-end-eth0", true},
+			{"ip netns del netflow-vm1", true},
+			{"ip netns del netflow-vm2", true},
+			{"ip netns del netflow-end", true},
+		},
+
+		captures: []TestCapture{
+			{gremlin: g.G.V().Has("Name", "netflo-vm1-eth0"), target: "169.254.67.2:8989", targetType: "netflowv5", bpf: "icmp"},
+			{gremlin: g.G.V().Has("Name", "netflo-end-eth0")},
+		},
+
+		mode: Replay,
+
+		checks: []CheckFunction{func(c *CheckContext) error {
+			flows, err := c.gh.GetFlows(c.gremlin.Flows().Has("Application", "UDP", "Transport", 8989))
+			if err != nil {
+				return err
+			}
+
+			if len(flows) != 1 {
+				return fmt.Errorf("Should get 1 udp flow, got : %v", flows)
+			}
+
+			return nil
+		}},
+	}
+
+	RunTest(t, test)
+}
+
+func TestFlowsHashCnx(t *testing.T) {
+	test := testFlowsHashCnx(t)
+	RunTest(t, test)
+}
+
+func testFlowsHashCnx(t *testing.T) *Test {
+	test := &Test{
+		setupCmds: []Cmd{
+			{"ovs-vsctl add-br br-hash", true},
+
+			{"ip netns add src-vm", true},
+			{"ip link add src-vm-eth0 type veth peer name hash-src-eth0 netns src-vm", true},
+			{"ip link set src-vm-eth0 up", true},
+			{"ip netns exec src-vm ip link set hash-src-eth0 up", true},
+			{"ip netns exec src-vm ip address add 169.254.107.33/24 dev hash-src-eth0", true},
+
+			{"ip netns add dst-vm", true},
+			{"ip link add dst-vm-eth0 type veth peer name hash-dst-eth0 netns dst-vm", true},
+			{"ip link set dst-vm-eth0 up", true},
+			{"ip netns exec dst-vm ip link set hash-dst-eth0 up", true},
+			{"ip netns exec dst-vm ip address add 169.254.107.34/24 dev hash-dst-eth0", true},
+
+			{"ovs-vsctl add-port br-hash src-vm-eth0", true},
+			{"ovs-vsctl add-port br-hash dst-vm-eth0", true},
+		},
+
+		injections: []TestInjection{
+			{
+				protocol: "tcp",
+
+				from:     g.G.V().Has("Name", "src-vm").Out().Has("Name", "hash-src-eth0"),
+				fromPort: 12345,
+				to:       g.G.V().Has("Name", "dst-vm").Out().Has("Name", "hash-dst-eth0"),
+				toPort:   54321,
+				count:    1,
+			},
+			{
+				protocol: "tcp",
+
+				from:     g.G.V().Has("Name", "src-vm").Out().Has("Name", "hash-src-eth0"),
+				fromPort: 54321,
+				to:       g.G.V().Has("Name", "dst-vm").Out().Has("Name", "hash-dst-eth0"),
+				toPort:   12345,
+				count:    1,
+			},
+		},
+
+		tearDownCmds: []Cmd{
+			{"ovs-vsctl del-br br-hash", true},
+			{"ip link del dst-vm-eth0", true},
+			{"ip link del src-vm-eth0", true},
+			{"ip netns del src-vm", true},
+			{"ip netns del dst-vm", true},
+		},
+
+		captures: []TestCapture{
+			{gremlin: g.G.V().Has("Name", "hash-src-eth0")},
+		},
+
+		mode: Replay,
+
+		checks: []CheckFunction{func(c *CheckContext) error {
+			gremlin := c.gremlin.Flows().Has("Network", "169.254.107.33", "LayersPath", "Ethernet/IPv4/TCP").Dedup()
+			flows, err := c.gh.GetFlows(gremlin)
+			if err != nil {
+				return err
+			}
+			if len(flows) != 2 {
+				return fmt.Errorf("Expected two flows, got %+v", flows)
+			}
+			foundAB := false
+			foundBA := false
+			for _, f := range flows {
+				if f.Metric.ABPackets != 1 || f.Metric.BAPackets != 1 {
+					return fmt.Errorf("Expected one packet each way, got %+v", flows)
+				}
+				if f.Transport.A == 12345 && f.Transport.B == 54321 {
+					foundAB = true
+				}
+				if f.Transport.B == 12345 && f.Transport.A == 54321 {
+					foundBA = true
+				}
+			}
+			if !foundAB || !foundBA {
+				return fmt.Errorf("Expected two flows, with ports swapped, got %+v", flows)
+			}
+			return nil
+		}},
+	}
+	return test
 }

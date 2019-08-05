@@ -186,10 +186,13 @@ var TopologyComponent = {
           <tab-pane title="Topology rules" v-if="topologyMode === \'live\'">\
             <topology-rules></topology-rules>\
           </tab-pane>\
+          <tab-pane title="Gremlin console">\
+             <gremlin-console></gremlin-console>\
+          </tab-pane>\
         </tabs>\
         <panel id="node-metadata" v-if="currentNodeMetadata"\
                :collapsed="false"\
-               title="Metadata">\
+               title="Metadata" :description="\'ID: \'+currentNode.id">\
           <template slot="actions">\
             <button v-if="currentNode.isGroupOwner()"\
                     title="Expand/Collapse Node"\
@@ -205,12 +208,24 @@ var TopologyComponent = {
           </object-detail>\
         </panel>\
         <panel id="edge-metadata" v-if="currentEdge"\
-               title="Metadata">\
-          <object-detail :object="currentEdge.metadata"></object-detail>\
+               title="Metadata" :description="\'ID: \'+currentEdge.id">\
+          <object-detail :object="currentEdgeMetadata"></object-detail>\
         </panel>\
         <panel id="docker-metadata" v-if="currentNodeDocker"\
                title="Docker">\
           <object-detail :object="currentNodeDocker"></object-detail>\
+        </panel>\
+        <panel id="edge-src-metadata" v-if="currentEdgeSrc"\
+                title="Source">\
+          <object-detail :object="currentEdgeSrc"></object-detail>\
+        </panel>\
+        <panel id="edge-via-metadata" v-if="currentEdgeVia"\
+                title="Via">\
+          <object-detail :object="currentEdgeVia"></object-detail>\
+        </panel>\
+        <panel id="edge-dst-metadata" v-if="currentEdgeDst"\
+          title="Destination">\
+          <object-detail :object="currentEdgeDst"></object-detail>\
         </panel>\
         <panel id="k8s-metadata" v-if="currentNodeK8s"\
                title="K8s.Extra">\
@@ -257,7 +272,7 @@ var TopologyComponent = {
         <panel id="routing-tabel" v-if="currentNodeMetadata && currentNode.metadata.RoutingTables"\
                title="Routing tables">\
           <div v-for="rt in currentNode.metadata.RoutingTables">\
-            <h2>src: {{rt.Src || "none"}}<span class="pull-right">(id: {{rt.Id}})</span></h2>\
+            <h2>src: {{rt.Src || "none"}}<span class="pull-right">(id: {{rt.ID}})</span></h2>\
             <routing-table :rt="rt"></routing-table>\
           </div>\
         </panel>\
@@ -439,6 +454,12 @@ var TopologyComponent = {
       return this.$store.state.currentEdge;
     },
 
+    currentEdgeMetadata: function() {
+      if (!this.currentEdge) return null;
+      return this.extractMetadata(this.currentEdge.metadata,
+        ['Directed', 'NSM.Source', 'NSM.Via', 'NSM.Destination']);
+    },
+
     currentNodeMetadata: function() {
       if (!this.currentNode) return null;
       return this.extractMetadata(this.currentNode.metadata,
@@ -454,6 +475,22 @@ var TopologyComponent = {
     currentNodeDocker: function() {
       if (!this.currentNodeMetadata || !this.currentNode.metadata.Docker) return null;
       return this.currentNode.metadata.Docker;
+    },
+
+    currentEdgeSrc: function() {
+      if (!this.currentEdgeMetadata || !this.currentEdge.metadata.NSM || !this.currentEdge.metadata.NSM.Source) return null;
+      return this.currentEdge.metadata.NSM.Source;
+    },
+
+    currentEdgeVia: function() {
+      if (!this.currentEdgeMetadata || !this.currentEdge.metadata.NSM || !this.currentEdge.metadata.NSM.Via) return null;
+      return this.currentEdge.metadata.NSM.Via;
+    },
+
+
+    currentEdgeDst: function() {
+      if (!this.currentEdgeMetadata || !this.currentEdge.metadata.NSM || !this.currentEdge.metadata.NSM.Destination) return null;
+      return this.currentEdge.metadata.NSM.Destination;
     },
 
     currentNodeK8s: function() {
@@ -523,7 +560,7 @@ var TopologyComponent = {
     isK8SEnabled: function() {
       return app.getConfigValue('k8s_enabled') || (globalVars["probes"].indexOf("k8s") >= 0);
     },
-	
+
     isIstioEnabled: function() {
       return app.getConfigValue('istio_enabled')
     },
@@ -691,7 +728,7 @@ var TopologyComponent = {
       var default_highlight = app.getConfigValue('topology.default_highlight');
       if (default_highlight) {
         self.defaultEmphasize = favorites[default_highlight];
-        if (self.defaultEmphasize) self.topologyEmphasize = value;
+        if (self.defaultEmphasize) self.topologyEmphasize = self.defaultEmphasize;
       }
     },
 
@@ -776,6 +813,14 @@ var TopologyComponent = {
 
     topologyFilterQuery: function() {
       var self = this;
+
+      if (!this.topologyFilter) {
+        var default_filter = app.getConfigValue('topology.default_filter');
+        if (default_filter) {
+          var favorites = app.getConfigValue('topology.favorites');
+          this.topologyFilter = favorites[default_filter];
+        }
+      }
 
       if (!this.topologyFilter || this.endsWith(this.topologyFilter, ")")) {
         var filter = this.topologyFilter;
@@ -985,10 +1030,6 @@ Node.prototype = {
     return this.group && this.group.owner === this && (!type || type === this.group.type);
   },
 
-  isCaptureOn: function() {
-    return "Capture/id" in this.metadata;
-  },
-
   isCaptureAllowed: function() {
     var allowedTypes = ["device", "veth", "ovsbridge", "geneve", "vlan", "bond", "ovsport",
                         "internal", "tun", "bridge", "vxlan", "gre", "gretap", "dpdkport"];
@@ -1020,6 +1061,8 @@ var Graph = function(websocket, onErrorCallback) {
 
   this.synced = false;
   this.live = true;
+
+  this.currentFilter = '';
 
   this.websocket.addConnectHandler(this.syncRequest.bind(this));
   this.websocket.addDisconnectHandler(this.invalidate.bind(this));
@@ -1309,7 +1352,19 @@ Graph.prototype = {
 
     if (filter) {
       obj.GremlinFilter = filter + ".SubGraph()";
+    } else {
+      var default_filter = app.getConfigValue('topology.default_filter');
+      if (default_filter) {
+        var favorites = app.getConfigValue('topology.favorites');
+        obj.GremlinFilter = favorites[default_filter] + ".SubGraph()";
+      }
     }
+
+    if (obj.GremlinFilter === this.currentFilter) {
+      return;
+    }
+    this.currentFilter = obj.GremlinFilter;
+
     var msg = {"Namespace": "Graph", "Type": "SyncRequest", "Obj": obj};
     this.websocket.send(msg);
   },

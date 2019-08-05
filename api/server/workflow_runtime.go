@@ -21,7 +21,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/skydive-project/skydive/js"
 
@@ -59,15 +58,6 @@ func NewWorkflowRuntime(g *graph.Graph, tr *traversal.GremlinTraversalParser, se
 		return r
 	}
 
-	runtime.Set("sleep", func(call otto.FunctionCall) otto.Value {
-		if len(call.ArgumentList) != 1 || !call.Argument(0).IsNumber() {
-			return runtime.MakeCustomError("MissingArgument", "Sleep requires a number parameter")
-		}
-		t, _ := call.Argument(0).ToInteger()
-		time.Sleep(time.Duration(t) * time.Millisecond)
-		return otto.NullValue()
-	})
-
 	runtime.Set("Gremlin", func(call otto.FunctionCall) otto.Value {
 		if len(call.ArgumentList) < 1 || !call.Argument(0).IsString() {
 			return runtime.MakeCustomError("MissingQueryArgument", "Gremlin requires a string parameter")
@@ -95,7 +85,7 @@ func NewWorkflowRuntime(g *graph.Graph, tr *traversal.GremlinTraversalParser, se
 
 		// For topology query, we directly call the Gremlin engine
 		if resource == "topology" {
-			query := types.TopologyParam{}
+			query := types.TopologyParams{}
 			if err := json.Unmarshal(data, &query); err != nil {
 				return runtime.MakeCustomError("WrongArgument", fmt.Sprintf("Invalid query %s", string(data)))
 			}
@@ -115,7 +105,7 @@ func NewWorkflowRuntime(g *graph.Graph, tr *traversal.GremlinTraversalParser, se
 			if err := json.Unmarshal([]byte(data), res); err != nil {
 				return runtime.MakeCustomError("UnmarshalError", err.Error())
 			}
-			if err := handler.Create(res); err != nil {
+			if err := handler.Create(res, nil); err != nil {
 				return runtime.MakeCustomError("CreateError", err.Error())
 			}
 			b, _ := json.Marshal(res)

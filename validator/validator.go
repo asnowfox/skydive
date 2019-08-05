@@ -42,7 +42,7 @@ var (
 
 	//IPNotValid validator
 	IPNotValid = func() error {
-		return valid.TextErr{Err: errors.New("Not a IP addr")}
+		return valid.TextErr{Err: errors.New("Not an IP address")}
 	}
 	// GremlinNotValid validator
 	GremlinNotValid = func(err error) error {
@@ -68,18 +68,96 @@ var (
 	CaptureTypeNotValid = func(t string) error {
 		return valid.TextErr{Err: fmt.Errorf("Not a valid capture type: %s, available types: %v", t, common.ProbeTypes)}
 	}
+	//AddressNotValid validator
+	AddressNotValid = func() error {
+		return valid.TextErr{Err: errors.New("Not a valid address")}
+	}
+	//MACNotValid validator
+	MACNotValid = func() error {
+		return valid.TextErr{Err: errors.New("Not a MAC address")}
+	}
+	//IPOrCIDRNotValid validator
+	IPOrCIDRNotValid = func() error {
+		return valid.TextErr{Err: errors.New("Not a IP or CIDR address")}
+	}
 )
 
-func isIP(v interface{}, param string) error {
-	ip, ok := v.(string)
+func isValidAddress(v interface{}, param string) error {
+	addr, ok := v.(string)
 	if !ok {
+		return AddressNotValid()
+	}
+
+	if addr == "" {
+		return nil
+	}
+
+	if _, err := common.ServiceAddressFromString(addr); err != nil {
+		return AddressNotValid()
+	}
+
+	return nil
+}
+
+func isIP(v interface{}, param string) error {
+	switch v := v.(type) {
+	case string:
+		/* Parse/Check IPv4 and IPv6 address */
+		if v == "" {
+			return nil
+		} else if n := net.ParseIP(v); n == nil {
+			return IPNotValid()
+		}
+		return nil
+	case net.IP:
+		return nil
+	default:
 		return IPNotValid()
 	}
-	/* Parse/Check IPv4 and IPv6 address */
-	if n := net.ParseIP(ip); n == nil {
-		return IPNotValid()
+}
+
+func isMAC(v interface{}, param string) error {
+	switch v := v.(type) {
+	case string:
+		if v == "" {
+			return nil
+		} else if _, err := net.ParseMAC(v); err != nil {
+			return MACNotValid()
+		}
+	case net.HardwareAddr:
+		if len(v) == 0 {
+			return nil
+		}
+		if len(v) != 6 {
+			return MACNotValid()
+		}
 	}
 	return nil
+}
+
+func isIPOrCIDR(v interface{}, param string) error {
+	switch v := v.(type) {
+	case string:
+		if v == "" {
+			return nil
+		}
+		if strings.Contains(v, "/") {
+			if _, _, err := net.ParseCIDR(v); err != nil {
+				return IPOrCIDRNotValid()
+			}
+		} else {
+			if n := net.ParseIP(v); n == nil {
+				return IPOrCIDRNotValid()
+			}
+		}
+		return nil
+	case net.IPNet:
+		return nil
+	case net.IP:
+		return nil
+	default:
+		return IPOrCIDRNotValid()
+	}
 }
 
 func isGremlinExpr(v interface{}, param string) error {
@@ -202,6 +280,8 @@ func Validate(value interface{}) error {
 
 func init() {
 	skydiveValidator.SetValidationFunc("isIP", isIP)
+	skydiveValidator.SetValidationFunc("isMAC", isMAC)
+	skydiveValidator.SetValidationFunc("isIPOrCIDR", isIPOrCIDR)
 	skydiveValidator.SetValidationFunc("isGremlinExpr", isGremlinExpr)
 	skydiveValidator.SetValidationFunc("isGremlinOrEmpty", isGremlinOrEmpty)
 	skydiveValidator.SetValidationFunc("isBPFFilter", isBPFFilter)
@@ -210,5 +290,6 @@ func init() {
 	skydiveValidator.SetValidationFunc("isValidLayerKeyMode", isValidLayerKeyMode)
 	skydiveValidator.SetValidationFunc("isValidWorkflow", isValidWorkflow)
 	skydiveValidator.SetValidationFunc("isValidCaptureType", isValidCaptureType)
+	skydiveValidator.SetValidationFunc("isValidAddress", isValidAddress)
 	skydiveValidator.SetTag("valid")
 }

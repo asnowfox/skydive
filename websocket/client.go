@@ -42,7 +42,7 @@ const (
 )
 
 // ConnState describes the connection state
-type ConnState int32
+type ConnState common.ServiceState
 
 // ConnStatus describes the status of a WebSocket connection
 type ConnStatus struct {
@@ -59,9 +59,24 @@ type ConnStatus struct {
 	RemoteServiceType common.ServiceType `json:",omitempty"`
 }
 
-// MarshalJSON marshal the connexion state to JSON
+// Store atomatically stores the state
+func (s *ConnState) Store(state common.ServiceState) {
+	(*common.ServiceState)(s).Store(state)
+}
+
+// Load atomatically loads and returns the state
+func (s *ConnState) Load() common.ServiceState {
+	return (*common.ServiceState)(s).Load()
+}
+
+// CompareAndSwap executes the compare-and-swap operation for a state
+func (s *ConnState) CompareAndSwap(old, new common.ServiceState) bool {
+	return atomic.CompareAndSwapInt64((*int64)(s), int64(old), int64(new))
+}
+
+// MarshalJSON marshal the connection state to JSON
 func (s *ConnState) MarshalJSON() ([]byte, error) {
-	switch *s {
+	switch common.ServiceState(*s) {
 	case common.RunningState:
 		return []byte("true"), nil
 	case common.StoppedState:
@@ -70,7 +85,7 @@ func (s *ConnState) MarshalJSON() ([]byte, error) {
 	return nil, fmt.Errorf("Invalid state: %d", s)
 }
 
-// UnmarshalJSON deserialize a connection state
+// UnmarshalJSON de-serialize a connection state
 func (s *ConnState) UnmarshalJSON(b []byte) error {
 	var state bool
 	if err := json.Unmarshal(b, &state); err != nil {
@@ -78,9 +93,9 @@ func (s *ConnState) UnmarshalJSON(b []byte) error {
 	}
 
 	if state {
-		*s = common.RunningState
+		*s = ConnState(common.RunningState)
 	} else {
-		*s = common.StoppedState
+		*s = ConnState(common.StoppedState)
 	}
 
 	return nil
@@ -115,6 +130,7 @@ type Speaker interface {
 	Connect() error
 	Start()
 	Stop()
+	StopAndWait()
 	AddEventHandler(SpeakerEventHandler)
 	GetRemoteHost() string
 	GetRemoteServiceType() common.ServiceType
@@ -135,6 +151,8 @@ type Conn struct {
 	eventHandlers    []SpeakerEventHandler
 	wsSpeaker        Speaker // speaker owning the connection
 	writeCompression bool
+	messageType      int
+	logger           logging.Logger
 }
 
 // wsIncomingClient is only used internally to handle incoming client. It embeds a Conn.
@@ -148,7 +166,8 @@ type Client struct {
 	*Conn
 	Path      string
 	AuthOpts  *shttp.AuthenticationOpts
-	tlsConfig *tls.Config
+	TLSConfig *tls.Config
+	Opts      ClientOpts
 }
 
 // ClientOpts defines some options that can be set when creating a new client
@@ -159,6 +178,7 @@ type ClientOpts struct {
 	QueueSize        int
 	WriteCompression bool
 	TLSConfig        *tls.Config
+	Logger           logging.Logger
 }
 
 // SpeakerEventHandler is the interface to be implement by the client events listeners.
@@ -201,7 +221,7 @@ func (c *Conn) GetURL() *url.URL {
 
 // IsConnected returns the connection status.
 func (c *Conn) IsConnected() bool {
-	return atomic.LoadInt32((*int32)(c.State)) == common.RunningState
+	return c.State.Load() == common.RunningState
 }
 
 // GetStatus returns the status of a WebSocket connection
@@ -211,7 +231,7 @@ func (c *Conn) GetStatus() ConnStatus {
 
 	status := c.ConnStatus
 	status.State = new(ConnState)
-	*status.State = ConnState(atomic.LoadInt32((*int32)(c.State)))
+	*status.State = ConnState(c.State.Load())
 	return c.ConnStatus
 }
 
@@ -272,11 +292,11 @@ func (c *Conn) GetRemoteServiceType() common.ServiceType {
 	return c.RemoteServiceType
 }
 
-// SendMessage sends a message directly over the wire.
+// write sends a message directly over the wire.
 func (c *Conn) write(msg []byte) error {
 	c.conn.SetWriteDeadline(time.Now().Add(writeWait))
 	c.conn.EnableWriteCompression(c.writeCompression)
-	w, err := c.conn.NextWriter(websocket.TextMessage)
+	w, err := c.conn.NextWriter(c.messageType)
 	if err != nil {
 		return err
 	}
@@ -290,47 +310,45 @@ func (c *Conn) write(msg []byte) error {
 
 // Run the main loop
 func (c *Conn) Run() {
-	c.wg.Add(1)
+	c.wg.Add(2)
 	c.run()
 }
 
 // Start main loop in a goroutine
 func (c *Conn) Start() {
-	c.wg.Add(1)
+	c.wg.Add(2)
 	go c.run()
 }
 
 // main loop to read and send messages
 func (c *Conn) run() {
-	flushChannel := func(c chan []byte, cb func(msg []byte)) {
+	flushChannel := func(c chan []byte, cb func(msg []byte) error) error {
 		for {
 			select {
 			case m := <-c:
-				cb(m)
+				if err := cb(m); err != nil {
+					return err
+				}
 			default:
-				return
+				return nil
 			}
 		}
 	}
 
 	// notify all the listeners that a message was received
-	handleReceivedMessage := func(m []byte) {
+	handleReceivedMessage := func(m []byte) error {
 		c.RLock()
 		for _, l := range c.eventHandlers {
 			l.OnMessage(c.wsSpeaker, RawMessage(m))
 		}
 		c.RUnlock()
-	}
-
-	// write the message to the wire
-	handleSentMessage := func(m []byte) {
-		if err := c.write(m); err != nil {
-			logging.GetLogger().Errorf("Error while writing to the WebSocket: %s", err)
-		}
+		return nil
 	}
 
 	// goroutine to read messages from the socket and put them into a channel
 	go func() {
+		defer c.wg.Done()
+
 		for c.running.Load() == true {
 			_, m, err := c.conn.ReadMessage()
 			if err != nil {
@@ -343,55 +361,46 @@ func (c *Conn) run() {
 		}
 	}()
 
-	done := make(chan bool, 2)
-	go func() {
-		defer func() {
-			c.conn.Close()
-			atomic.StoreInt32((*int32)(c.State), common.StoppedState)
+	defer func() {
+		c.conn.Close()
+		c.State.Store(common.StoppedState)
 
-			// handle all the pending received messages
-			flushChannel(c.read, func(m []byte) {
-				handleReceivedMessage(m)
-			})
+		// handle all the pending received messages
+		flushChannel(c.read, handleReceivedMessage)
 
-			c.wg.Done()
-
-			c.RLock()
-			for _, l := range c.eventHandlers {
-				l.OnDisconnected(c.wsSpeaker)
-			}
-			c.RUnlock()
-		}()
-
-		for {
-			select {
-			case m := <-c.send:
-				handleSentMessage(m)
-			case <-c.flush:
-				flushChannel(c.send, func(m []byte) {
-					handleSentMessage(m)
-				})
-			case <-c.pingTicker.C:
-				if err := c.sendPing(); err != nil {
-					logging.GetLogger().Errorf("Error while sending ping to %+v: %s", c, err)
-
-					// stop the ticker and request a quit
-					c.pingTicker.Stop()
-					c.quit <- true
-				}
-			case <-done:
-				return
-			}
+		c.RLock()
+		for _, l := range c.eventHandlers {
+			l.OnDisconnected(c.wsSpeaker)
 		}
+		c.RUnlock()
+
+		c.wg.Done()
 	}()
 
 	for {
 		select {
 		case <-c.quit:
-			done <- true
 			return
 		case m := <-c.read:
 			handleReceivedMessage(m)
+		case m := <-c.send:
+			if err := c.write(m); err != nil {
+				c.logger.Errorf("Error while sending message to %+v: %s", c, err)
+				return
+			}
+		case <-c.flush:
+			if err := flushChannel(c.send, c.write); err != nil {
+				c.logger.Errorf("Error while flushing send queue for %+v: %s", c, err)
+				return
+			}
+		case <-c.pingTicker.C:
+			if err := c.sendPing(); err != nil {
+				c.logger.Errorf("Error while sending ping to %+v: %s", c, err)
+
+				// stop the ticker and request a quit
+				c.pingTicker.Stop()
+				return
+			}
 		}
 	}
 }
@@ -420,16 +429,21 @@ func (c *Conn) Flush() {
 	c.flush <- struct{}{}
 }
 
-// Stop disconnect the speakers and wait for the goroutine to end
+// Stop disconnect the speaker
 func (c *Conn) Stop() {
 	c.running.Store(false)
-	if atomic.CompareAndSwapInt32((*int32)(c.State), common.RunningState, common.StoppingState) {
+	if c.State.CompareAndSwap(common.RunningState, common.StoppingState) {
 		c.quit <- true
 	}
+}
+
+// StopAndWait disconnect the speaker and wait for the goroutine to end
+func (c *Conn) StopAndWait() {
+	c.Stop()
 	c.wg.Wait()
 }
 
-func newConn(host string, clientType common.ServiceType, clientProtocol Protocol, url *url.URL, headers http.Header, queueSize int, writeCompression bool) *Conn {
+func newConn(host string, clientType common.ServiceType, clientProtocol Protocol, url *url.URL, headers http.Header, opts ClientOpts) *Conn {
 	if headers == nil {
 		headers = http.Header{}
 	}
@@ -447,20 +461,28 @@ func newConn(host string, clientType common.ServiceType, clientProtocol Protocol
 			Headers:        headers,
 			ConnectTime:    time.Now(),
 		},
-		send:             make(chan []byte, queueSize),
-		read:             make(chan []byte, queueSize),
+		send:             make(chan []byte, opts.QueueSize),
+		read:             make(chan []byte, opts.QueueSize),
 		flush:            make(chan struct{}),
 		quit:             make(chan bool, 2),
 		pingTicker:       &time.Ticker{},
-		writeCompression: writeCompression,
+		writeCompression: opts.WriteCompression,
+		logger:           opts.Logger,
 	}
-	*c.State = common.StoppedState
+
+	if clientProtocol == JSONProtocol {
+		c.messageType = websocket.TextMessage
+	} else {
+		c.messageType = websocket.BinaryMessage
+	}
+
+	c.State.Store(common.StoppedState)
 	c.running.Store(true)
 	return c
 }
 
 func (c *Client) scheme() string {
-	if c.tlsConfig != nil {
+	if c.TLSConfig != nil {
 		return "wss://"
 	}
 	return "ws://"
@@ -482,7 +504,7 @@ func (c *Client) Connect() error {
 		headers[k] = v
 	}
 
-	logging.GetLogger().Infof("Connecting to %s", endpoint)
+	c.Opts.Logger.Infof("Connecting to %s", endpoint)
 
 	if c.AuthOpts != nil {
 		shttp.SetAuthHeaders(&headers, c.AuthOpts)
@@ -493,7 +515,7 @@ func (c *Client) Connect() error {
 		ReadBufferSize:  1024,
 		WriteBufferSize: 1024,
 	}
-	d.TLSClientConfig = c.tlsConfig
+	d.TLSClientConfig = c.TLSConfig
 
 	var resp *http.Response
 	c.conn, resp, err = d.Dial(endpoint, headers)
@@ -504,9 +526,9 @@ func (c *Client) Connect() error {
 	c.conn.SetPingHandler(nil)
 	c.conn.EnableWriteCompression(c.writeCompression)
 
-	atomic.StoreInt32((*int32)(c.State), common.RunningState)
+	c.State.Store(common.RunningState)
 
-	logging.GetLogger().Infof("Connected to %s", endpoint)
+	c.Opts.Logger.Infof("Connected to %s", endpoint)
 
 	c.RemoteHost = resp.Header.Get("X-Host-ID")
 
@@ -540,8 +562,11 @@ func (c *Client) Start() {
 		for c.running.Load() == true {
 			if err := c.Connect(); err == nil {
 				c.Run()
+				if c.running.Load() == true {
+					c.wg.Wait()
+				}
 			} else {
-				logging.GetLogger().Error(err)
+				c.Opts.Logger.Error(err)
 			}
 			time.Sleep(1 * time.Second)
 		}
@@ -550,12 +575,18 @@ func (c *Client) Start() {
 
 // NewClient returns a Client with a new connection.
 func NewClient(host string, clientType common.ServiceType, url *url.URL, opts ClientOpts) *Client {
-	wsconn := newConn(host, clientType, opts.Protocol, url, opts.Headers, opts.QueueSize, opts.WriteCompression)
+	if opts.Logger == nil {
+		opts.Logger = logging.GetLogger()
+	}
+
+	wsconn := newConn(host, clientType, opts.Protocol, url, opts.Headers, opts)
 	c := &Client{
 		Conn:      wsconn,
 		AuthOpts:  opts.AuthOpts,
-		tlsConfig: opts.TLSConfig,
+		TLSConfig: opts.TLSConfig,
+		Opts:      opts,
 	}
+
 	wsconn.wsSpeaker = c
 	return c
 }

@@ -33,7 +33,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kballard/go-shellquote"
+	shellquote "github.com/kballard/go-shellquote"
 	"github.com/skydive-project/skydive/agent"
 	"github.com/skydive-project/skydive/analyzer"
 	gclient "github.com/skydive-project/skydive/api/client"
@@ -41,6 +41,7 @@ import (
 	"github.com/skydive-project/skydive/common"
 	"github.com/skydive-project/skydive/config"
 	"github.com/skydive-project/skydive/flow"
+	"github.com/skydive-project/skydive/flow/probes"
 	g "github.com/skydive-project/skydive/gremlin"
 	shttp "github.com/skydive-project/skydive/http"
 	"github.com/skydive-project/skydive/logging"
@@ -163,6 +164,8 @@ type TestCapture struct {
 	port            int
 	samplingRate    uint32 // default-value : 1
 	pollingInterval uint32 // default-value : 10
+	target          string
+	targetType      string
 }
 
 // TestInjection describes a packet injection to be created in tests
@@ -171,12 +174,15 @@ type TestInjection struct {
 	from      g.QueryString
 	fromMAC   string
 	fromIP    string
+	fromPort  uint16
 	to        g.QueryString
 	toMAC     string
 	toIP      string
+	toPort    uint16
+	protocol  string // icmp if not set
 	ipv6      bool
-	count     int64
-	id        int64
+	count     uint64
+	id        uint64
 	increment bool
 	payload   string
 	pcap      string
@@ -226,6 +232,7 @@ var (
 	ovsOflowNative    bool
 	standalone        bool
 	topologyBackend   string
+	profile           bool
 )
 
 func initConfig(conf string, params ...helperParams) error {
@@ -383,7 +390,12 @@ func (c *TestContext) getWholeGraph(t *testing.T, at time.Time) string {
 			return ""
 		}
 
-		return string(data)
+		var out bytes.Buffer
+		json.Indent(&out, data, "", "\t")
+
+		ioutil.WriteFile("graph.json", out.Bytes(), 0644)
+
+		return out.String()
 	}
 }
 
@@ -458,7 +470,9 @@ func RunTest(t *testing.T, test *Test) {
 		capture.Port = tc.port
 		capture.SamplingRate = tc.samplingRate
 		capture.PollingInterval = tc.pollingInterval
-		if err = client.Create("capture", capture); err != nil {
+		capture.Target = tc.target
+		capture.TargetType = tc.targetType
+		if err = client.Create("capture", capture, nil); err != nil {
 			t.Fatal(err)
 		}
 		captures = append(captures, capture)
@@ -499,21 +513,32 @@ func RunTest(t *testing.T, test *Test) {
 					continue
 				}
 
-				captureID, err := node.GetFieldString("Capture.ID")
-				if err != nil {
-					return fmt.Errorf("Node %+v matched the capture but capture is not enabled, graph: %s", node, context.getWholeGraph(t, time.Time{}))
-				}
-				if captureID != capture.ID() {
-					return fmt.Errorf("Node %s matches multiple captures, graph: %s", node.ID, context.getWholeGraph(t, time.Time{}))
+				findCapture := func(id string) *probes.CaptureMetadata {
+					field, err := node.GetField("Captures")
+					if err != nil {
+						return nil
+					}
+
+					if captures, ok := field.(*probes.Captures); ok {
+						for _, capture := range *captures {
+							if capture.ID == id {
+								return capture
+							}
+						}
+					}
+					return nil
 				}
 
-				captureState, err := node.GetFieldString("Capture.State")
-				if err != nil {
-					return fmt.Errorf("Node %+v matched the capture but capture state is not set, graph: %s", node, context.getWholeGraph(t, time.Time{}))
+				captureMetadata := findCapture(capture.ID())
+				if captureMetadata == nil {
+					return fmt.Errorf("Node %+v matched the capture but capture %s is not enabled, graph: %s", node, capture.ID(), context.getWholeGraph(t, time.Time{}))
 				}
-				if captureState != "active" {
+
+				if captureMetadata.State != "active" {
 					return fmt.Errorf("Capture %s is not active, graph: %s", capture.ID(), context.getWholeGraph(t, time.Time{}))
 				}
+
+				return nil
 			}
 		}
 
@@ -611,6 +636,9 @@ func RunTest(t *testing.T, test *Test) {
 	}()
 
 	for _, injection := range test.injections {
+		if injection.protocol == "" {
+			injection.protocol = "icmp"
+		}
 		ipVersion := 4
 		if injection.ipv6 {
 			ipVersion = 6
@@ -656,12 +684,14 @@ func RunTest(t *testing.T, test *Test) {
 			Src:       src,
 			SrcMAC:    srcMAC,
 			SrcIP:     srcIP,
+			SrcPort:   injection.fromPort,
 			Dst:       injection.to.String(),
 			DstMAC:    injection.toMAC,
 			DstIP:     injection.toIP,
-			Type:      fmt.Sprintf("icmp%d", ipVersion),
+			DstPort:   injection.toPort,
+			Type:      fmt.Sprintf("%s%d", injection.protocol, ipVersion),
 			Count:     injection.count,
-			ICMPID:    injection.id,
+			ICMPID:    uint16(injection.id),
 			Increment: injection.increment,
 			Payload:   injection.payload,
 			Interval:  1000,
@@ -740,10 +770,10 @@ func RunTest(t *testing.T, test *Test) {
 }
 
 func pingRequest(t *testing.T, context *TestContext, packet *types.PacketInjection) error {
-	return context.client.Create("injectpacket", packet)
+	return context.client.Create("injectpacket", packet, nil)
 }
 
-func ping(t *testing.T, context *TestContext, ipVersion int, src, dst g.QueryString, count int64, id int64) error {
+func ping(t *testing.T, context *TestContext, ipVersion int, src, dst g.QueryString, count uint64, id uint16) error {
 	packet := &types.PacketInjection{
 		Src:      src.String(),
 		Dst:      dst.String(),
@@ -811,6 +841,10 @@ func delaySec(sec int, err ...error) error {
 var initStandalone = false
 
 func runStandalone() {
+	if profile {
+		go common.Profile()
+	}
+
 	server, err := analyzer.NewServerFromConfig()
 	if err != nil {
 		panic(err)
@@ -839,6 +873,7 @@ func init() {
 	flag.StringVar(&analyzerProbes, "analyzer.topology.probes", "", "Specify the analyzer probes to enable")
 	flag.StringVar(&agentProbes, "agent.topology.probes", "", "Specify the extra agent probes to enable")
 	flag.BoolVar(&ovsOflowNative, "ovs.oflow.native", false, "Use native OpenFlow protocol instead of ovs-ofctl")
+	flag.BoolVar(&profile, "profile", false, "Start profiling")
 	flag.Parse()
 
 	http.DefaultTransport.(*http.Transport).MaxIdleConnsPerHost = 100

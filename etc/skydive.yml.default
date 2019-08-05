@@ -110,6 +110,7 @@ analyzer:
     probes:
       # - k8s
       # - istio
+      # - nsm
       # - ovn
 
     k8s:
@@ -162,9 +163,9 @@ analyzer:
 
     ovn:
       # OVN northbound address. Format can be either:
-      # * tcp://addr:port
-      # * unix:///var/run/openvswitch/ovnnb_db.sock
-      # address: unix:///var/run/openvswitch/ovnnb_db.sock
+      # * tcp:addr:port
+      # * unix:/var/run/openvswitch/ovnnb_db.sock
+      # address: unix:/var/run/openvswitch/ovnnb_db.sock
 
   replication:
     # debug: false
@@ -252,6 +253,38 @@ agent:
       # could be use when vpp and skydive are isolated in different container
       # connect: ""
 
+  flow:
+    sflow:
+      # Default listening address is 127.0.0.1
+      # bind_address: 127.0.0.1
+
+      # Port min/max used when starting a sflow probe, an agent will be started
+      # with a port from this range
+      # port_min: 6345
+      # port_max: 6355
+
+    pcapsocket:
+      # Default listening address is 127.0.0.1
+      # bind_address: 127.0.0.1
+
+      # Port min/max used when starting a pcapsocket probe
+      # port_min: 8100
+      # port_max: 8132
+
+    netflow:
+      # Default listening address is 127.0.0.1
+      # bind_address: 127.0.0.1
+
+      # Port min/max used when starting a netflow probe, an agent will be started
+      # with a port from this range
+      # port_min: 6365
+      # port_max: 6375
+
+    ebpf:
+      # Period in seconds representing the delay between two successive scans 
+      # of the kernel table in ebpf mode for new flow updates. Default interval is 10 seconds
+      # kernel_scan_interval: 10
+
   capture:
     # Period in second to get capture stats from the probe. Note this
     # stats_update: 1
@@ -282,15 +315,6 @@ dpdk:
 
   # debug message every n seconds
   # debug: 1
-
-sflow:
-  # Default listening address is 127.0.0.1
-  # bind_address: 127.0.0.1
-
-  # Port min/max used when starting a sflow probe, a agent will be started
-  # with a port from this range
-  # port_min: 6345
-  # port_max: 6355
 
 ovs:
   # ovsdb connection, Format supported :
@@ -461,6 +485,9 @@ flow:
 
   # Protocol to use to send flows to the analyzer: websocket or udp
   # protocol: udp
+
+  # Maximum size of the flow table in userspace
+  # max_entries: 500000
 
   # Define the layer key mode used by default for captures. The key mode defines
   # the layers used to identify a unique flow.

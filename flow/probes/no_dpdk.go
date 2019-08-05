@@ -22,6 +22,7 @@ package probes
 import (
 	"github.com/skydive-project/skydive/api/types"
 	"github.com/skydive-project/skydive/graffiti/graph"
+	"github.com/skydive-project/skydive/probe"
 )
 
 // DPDKProbesHandler describes a flow probe handle in the graph
@@ -29,12 +30,12 @@ type DPDKProbesHandler struct {
 }
 
 // RegisterProbe registers a gopacket probe
-func (p *DPDKProbesHandler) RegisterProbe(n *graph.Node, capture *types.Capture, e FlowProbeEventHandler) error {
-	return nil
+func (p *DPDKProbesHandler) RegisterProbe(n *graph.Node, capture *types.Capture, e ProbeEventHandler) (Probe, error) {
+	return nil, nil
 }
 
 // UnregisterProbe unregisters gopacket probe
-func (p *DPDKProbesHandler) UnregisterProbe(n *graph.Node, e FlowProbeEventHandler) error {
+func (p *DPDKProbesHandler) UnregisterProbe(n *graph.Node, e ProbeEventHandler, fp Probe) error {
 	return nil
 }
 
@@ -46,7 +47,12 @@ func (p *DPDKProbesHandler) Start() {
 func (p *DPDKProbesHandler) Stop() {
 }
 
-// NewDPDKProbesHandler creates a new gopacket probe in the graph
-func NewDPDKProbesHandler(g *graph.Graph, fpta *FlowProbeTableAllocator) (*DPDKProbesHandler, error) {
+// CaptureTypes supported
+func (p *DPDKProbesHandler) CaptureTypes() []string {
+	return []string{}
+}
+
+// Init initializes a new dpdk probe
+func (p *DPDKProbesHandler) Init(ctx Context, bundle *probe.Bundle) (FlowProbeHandler, error) {
 	return nil, ErrProbeNotCompiled
 }

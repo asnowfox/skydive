@@ -192,6 +192,14 @@ func (r *Runtime) registerStandardLibray() {
 	}`)
 	r.Set("clearTimeout", clearTimeout)
 	r.Set("clearInterval", clearTimeout)
+	r.Set("sleep", func(call otto.FunctionCall) otto.Value {
+		if len(call.ArgumentList) != 1 || !call.Argument(0).IsNumber() {
+			return r.MakeCustomError("MissingArgument", "Sleep requires a number parameter")
+		}
+		t, _ := call.Argument(0).ToInteger()
+		time.Sleep(time.Duration(t) * time.Millisecond)
+		return otto.NullValue()
+	})
 }
 
 func (r *Runtime) runEventLoop() {
@@ -289,7 +297,7 @@ func (r *Runtime) ExecPromise(source string, params ...interface{}) (v otto.Valu
 	return v, err
 }
 
-// CallFunction takes the source of a function and evaluate it with the specifed parameters
+// CallFunction takes the source of a function and evaluate it with the specified parameters
 func (r *Runtime) CallFunction(source string, params ...interface{}) (otto.Value, error) {
 	result, err := r.Run("(" + source + ")")
 	if err != nil {
@@ -299,7 +307,7 @@ func (r *Runtime) CallFunction(source string, params ...interface{}) (otto.Value
 	return result.Call(result, params...)
 }
 
-// CallPromise takes the source of a promise and evaluate it with the specifed parameters
+// CallPromise takes the source of a promise and evaluate it with the specified parameters
 func (r *Runtime) CallPromise(source string, params ...interface{}) (chan otto.Value, error) {
 	result, err := r.CallFunction(source, params...)
 	if err != nil {
@@ -312,7 +320,7 @@ func (r *Runtime) CallPromise(source string, params ...interface{}) (chan otto.V
 
 	done := make(chan otto.Value)
 	promise := result.Object()
-	finally, err := r.ToValue(func(call otto.FunctionCall) otto.Value {
+	finally, _ := r.ToValue(func(call otto.FunctionCall) otto.Value {
 		result = call.Argument(0)
 		done <- result
 		return result

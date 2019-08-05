@@ -1,3 +1,5 @@
+//go:generate go run ../../scripts/gendecoder.go -package github.com/skydive-project/skydive/flow/probes
+
 /*
  * Copyright (C) 2016 Red Hat, Inc.
  *
@@ -18,89 +20,89 @@
 package probes
 
 import (
+	"encoding/json"
 	"fmt"
 
-	"github.com/skydive-project/skydive/analyzer"
 	"github.com/skydive-project/skydive/api/types"
+	"github.com/skydive-project/skydive/common"
+	"github.com/skydive-project/skydive/config"
 	"github.com/skydive-project/skydive/flow"
 	"github.com/skydive-project/skydive/graffiti/graph"
 	"github.com/skydive-project/skydive/logging"
+	"github.com/skydive-project/skydive/ondemand"
 	"github.com/skydive-project/skydive/probe"
 )
 
 // ErrProbeNotCompiled is thrown when a flow probe was not compiled within the binary
 var ErrProbeNotCompiled = fmt.Errorf("probe is not compiled within skydive")
 
-// FlowProbe defines flow probe mechanism
-type FlowProbe interface {
-	probe.Probe // inheritance of the probe.Probe interface Start/Stop functions
-	RegisterProbe(n *graph.Node, capture *types.Capture, e FlowProbeEventHandler) error
-	UnregisterProbe(n *graph.Node, e FlowProbeEventHandler) error
+// Probe defines an active flow probe
+type Probe = ondemand.Task
+
+// FlowProbeHandler defines flow probe mechanism
+type FlowProbeHandler interface {
+	probe.Handler // inheritance of the probe.Handler interface Start/Stop functions
+	RegisterProbe(n *graph.Node, capture *types.Capture, e ProbeEventHandler) (Probe, error)
+	UnregisterProbe(n *graph.Node, e ProbeEventHandler, p Probe) error
+	CaptureTypes() []string
+	Init(ctx Context, bundle *probe.Bundle) (FlowProbeHandler, error)
 }
 
-// FlowProbeEventHandler used by probes to notify capture state
-type FlowProbeEventHandler interface {
-	OnStarted()
+// Context defines a context to be used by constructor of probes
+type Context struct {
+	Logger logging.Logger
+	Config config.Config
+	Graph  *graph.Graph
+	FTA    *flow.TableAllocator
+	TB     *probe.Bundle
+}
+
+// ProbeEventHandler used by probes to notify state
+type ProbeEventHandler interface {
+	OnStarted(*CaptureMetadata)
 	OnStopped()
 	OnError(err error)
 }
 
-// FlowProbeTableAllocator allocates table and set the table update callback
-type FlowProbeTableAllocator struct {
-	*flow.TableAllocator
-	fcpool *analyzer.FlowClientPool
-}
-
-// Alloc override the default implementation provide a default update function
-func (a *FlowProbeTableAllocator) Alloc(nodeTID string, opts flow.TableOpts) *flow.Table {
-	return a.TableAllocator.Alloc(a.fcpool.SendFlows, nodeTID, opts)
-}
-
 // NewFlowProbeBundle returns a new bundle of flow probes
-func NewFlowProbeBundle(tb *probe.Bundle, g *graph.Graph, fta *flow.TableAllocator, fcpool *analyzer.FlowClientPool) *probe.Bundle {
-	list := []string{"pcapsocket", "ovssflow", "sflow", "gopacket", "dpdk", "ebpf", "ovsmirror"}
+func NewFlowProbeBundle(tb *probe.Bundle, g *graph.Graph, fta *flow.TableAllocator) *probe.Bundle {
+	list := []string{"pcapsocket", "ovssflow", "sflow", "gopacket", "dpdk", "ebpf", "ovsmirror", "ovsnetflow"}
 	logging.GetLogger().Infof("Flow probes: %v", list)
 
-	var captureTypes []string
-	var fp FlowProbe
+	var handler FlowProbeHandler
 	var err error
 
-	fpta := &FlowProbeTableAllocator{
-		TableAllocator: fta,
-		fcpool:         fcpool,
+	bundle := probe.NewBundle()
+	ctx := Context{
+		Logger: logging.GetLogger(),
+		Config: config.GetConfig(),
+		Graph:  g,
+		FTA:    fta,
+		TB:     tb,
 	}
 
-	fb := probe.NewBundle(make(map[string]probe.Probe))
-
 	for _, t := range list {
-		if fb.GetProbe(t) != nil {
+		if bundle.GetHandler(t) != nil {
 			continue
 		}
 
 		switch t {
 		case "pcapsocket":
-			fp, err = NewPcapSocketProbeHandler(g, fpta)
-			captureTypes = []string{"pcapsocket"}
+			handler, err = new(PcapSocketProbeHandler).Init(ctx, bundle)
 		case "ovssflow":
-			fp, err = NewOvsSFlowProbesHandler(g, fpta, tb)
-			captureTypes = []string{"ovssflow"}
+			handler, err = new(OvsSFlowProbesHandler).Init(ctx, bundle)
 		case "ovsmirror":
-			fp, err = NewOvsMirrorProbesHandler(g, tb, fb)
-			captureTypes = []string{"ovsmirror"}
+			handler, err = new(OvsMirrorProbesHandler).Init(ctx, bundle)
 		case "gopacket":
-			fp, err = NewGoPacketProbesHandler(g, fpta)
-			captureTypes = []string{"afpacket", "pcap"}
+			handler, err = new(GoPacketProbesHandler).Init(ctx, bundle)
 		case "sflow":
-			fp, err = NewSFlowProbesHandler(g, fpta)
-			captureTypes = []string{"sflow"}
+			handler, err = new(SFlowProbesHandler).Init(ctx, bundle)
+		case "ovsnetflow":
+			handler, err = new(OvsNetFlowProbesHandler).Init(ctx, bundle)
 		case "dpdk":
-			if fp, err = NewDPDKProbesHandler(g, fpta); err == nil {
-				captureTypes = []string{"dpdk"}
-			}
+			handler, err = new(DPDKProbesHandler).Init(ctx, bundle)
 		case "ebpf":
-			if fp, err = NewEBPFProbesHandler(g, fpta); err == nil {
-				captureTypes = []string{"ebpf"}
-			}
+			handler, err = new(EBPFProbesHandler).Init(ctx, bundle)
 		default:
 			err = fmt.Errorf("unknown probe type %s", t)
 		}
@@ -114,12 +116,12 @@ func NewFlowProbeBundle(tb *probe.Bundle, g *graph.Graph, fta *flow.TableAllocat
 			continue
 		}
 
-		for _, captureType := range captureTypes {
-			fb.AddProbe(captureType, fp)
+		for _, captureType := range handler.CaptureTypes() {
+			bundle.AddHandler(captureType, handler)
 		}
 	}
 
-	return fb
+	return bundle
 }
 
 func tableOptsFromCapture(capture *types.Capture) flow.TableOpts {
@@ -133,4 +135,45 @@ func tableOptsFromCapture(capture *types.Capture) flow.TableOpts {
 		LayerKeyMode:   layerKeyMode,
 		ExtraLayers:    capture.ExtraLayers,
 	}
+}
+
+// Captures holds the captures metadata
+// easyjson:json
+// gendecoder
+type Captures []*CaptureMetadata
+
+// CaptureMetadata holds attributes and statistics about a capture
+// easyjson:json
+// gendecoder
+type CaptureMetadata struct {
+	CaptureStats
+	ID          string `json:",omitempty"`
+	State       string `json:",omitempty"`
+	Name        string `json:",omitempty"`
+	Description string `json:",omitempty"`
+	BPFFilter   string `json:",omitempty"`
+	Type        string `json:",omitempty"`
+	PCAPSocket  string `json:",omitempty"`
+	MirrorOf    string `json:",omitempty"`
+	SFlowSocket string `json:",omitempty"`
+	Error       string `json:",omitempty"`
+}
+
+// CaptureStats describes the statistics of a running capture
+// easyjson:json
+// gendecoder
+type CaptureStats struct {
+	PacketsReceived  int64
+	PacketsDropped   int64
+	PacketsIfDropped int64
+}
+
+// CapturesMetadataDecoder implements a json message raw decoder
+func CapturesMetadataDecoder(raw json.RawMessage) (common.Getter, error) {
+	var captures Captures
+	if err := json.Unmarshal(raw, &captures); err != nil {
+		return nil, fmt.Errorf("unable to unmarshal captures metadata %s: %s", string(raw), err)
+	}
+
+	return &captures, nil
 }

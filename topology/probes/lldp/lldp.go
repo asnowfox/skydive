@@ -24,19 +24,20 @@ import (
 	"fmt"
 	"net"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"unsafe"
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	"github.com/safchain/ethtool"
+	"golang.org/x/sys/unix"
+
 	"github.com/skydive-project/skydive/common"
 	"github.com/skydive-project/skydive/flow/probes"
 	"github.com/skydive-project/skydive/graffiti/graph"
-	"github.com/skydive-project/skydive/logging"
+	"github.com/skydive-project/skydive/probe"
 	"github.com/skydive-project/skydive/topology"
-	"golang.org/x/sys/unix"
+	tp "github.com/skydive-project/skydive/topology/probes"
 )
 
 /*
@@ -60,10 +61,9 @@ const lldpSnapLen = 8192
 type Probe struct {
 	sync.RWMutex
 	graph.DefaultGraphListener
-	g             *graph.Graph
-	hostNode      *graph.Node                      // graph node of the running host
+	Ctx           tp.Context
 	interfaceMap  map[string]*probes.GoPacketProbe // map interface names to the packet probes
-	state         int64                            // state of the probe (running or stopped)
+	state         common.ServiceState              // state of the probe (running or stopped)
 	wg            sync.WaitGroup                   // capture goroutines wait group
 	autoDiscovery bool                             // capture LLDP traffic on all capable interfaces
 }
@@ -71,6 +71,17 @@ type Probe struct {
 type ifreq struct {
 	ifrName   [ethtool.IFNAMSIZ]byte
 	ifrHwaddr syscall.RawSockaddr
+}
+
+type lldpCapture struct{}
+
+func (c *lldpCapture) OnStarted(*probes.CaptureMetadata) {
+}
+
+func (c *lldpCapture) OnStopped() {
+}
+
+func (c *lldpCapture) OnError(err error) {
 }
 
 // addMulticastAddr adds a multicast address to an interface using an ioctl call
@@ -122,10 +133,12 @@ func (p *Probe) handlePacket(n *graph.Node, ifName string, packet gopacket.Packe
 			return string(bytes.Trim(b, "\x00"))
 		}
 
+		chassisLLDPMetadata := &Metadata{
+			ChassisIDType: lldpLayer.ChassisID.Subtype.String(),
+		}
+
 		chassisMetadata := graph.Metadata{
-			"LLDP": map[string]interface{}{
-				"ChassisIDType": lldpLayer.ChassisID.Subtype.String(),
-			},
+			"LLDP":  chassisLLDPMetadata,
 			"Type":  "switch",
 			"Probe": "lldp",
 		}
@@ -138,13 +151,14 @@ func (p *Probe) handlePacket(n *graph.Node, ifName string, packet gopacket.Packe
 		default:
 			chassisID = bytesToString(lldpLayer.ChassisID.ID)
 		}
-		common.SetField(chassisMetadata, "LLDP.ChassisID", chassisID)
-		common.SetField(chassisMetadata, "Name", chassisID)
+		chassisLLDPMetadata.ChassisID = chassisID
+		chassisMetadata.SetField("Name", chassisID)
 
+		portLLDPMetadata := &Metadata{
+			PortIDType: lldpLayer.PortID.Subtype.String(),
+		}
 		portMetadata := graph.Metadata{
-			"LLDP": map[string]interface{}{
-				"PortIDType": lldpLayer.PortID.Subtype.String(),
-			},
+			"LLDP":  portLLDPMetadata,
 			"Type":  "switchport",
 			"Probe": "lldp",
 		}
@@ -156,8 +170,8 @@ func (p *Probe) handlePacket(n *graph.Node, ifName string, packet gopacket.Packe
 		default:
 			portID = bytesToString(lldpLayer.PortID.ID)
 		}
-		common.SetField(portMetadata, "LLDP.PortID", portID)
-		common.SetField(portMetadata, "Name", portID)
+		portLLDPMetadata.PortID = portID
+		portMetadata.SetField("Name", portID)
 
 		if lldpLayerInfo := packet.Layer(layers.LayerTypeLinkLayerDiscoveryInfo); lldpLayerInfo != nil {
 			lldpLayerInfo := lldpLayerInfo.(*layers.LinkLayerDiscoveryInfo)
@@ -167,17 +181,17 @@ func (p *Probe) handlePacket(n *graph.Node, ifName string, packet gopacket.Packe
 				if portDescription == ifName {
 					return
 				}
-				common.SetField(portMetadata, "LLDP.Description", portDescription)
+				portLLDPMetadata.Description = portDescription
 				portMetadata["Name"] = bytesToString([]byte(portDescription))
 			}
 
 			if lldpLayerInfo.SysDescription != "" {
-				common.SetField(chassisMetadata, "LLDP.Description", bytesToString([]byte(lldpLayerInfo.SysDescription)))
+				chassisLLDPMetadata.Description = bytesToString([]byte(lldpLayerInfo.SysDescription))
 			}
 
 			if sysName := bytesToString([]byte(lldpLayerInfo.SysName)); sysName != "" {
 				chassisDiscriminators = append(chassisDiscriminators, sysName, "SysName")
-				common.SetField(chassisMetadata, "LLDP.SysName", sysName)
+				chassisLLDPMetadata.SysName = sysName
 				chassisMetadata["Name"] = sysName
 			}
 
@@ -192,52 +206,46 @@ func (p *Probe) handlePacket(n *graph.Node, ifName string, packet gopacket.Packe
 
 				if addr != "" {
 					chassisDiscriminators = append(chassisDiscriminators, addr, "MgmtAddress")
-					common.SetField(chassisMetadata, "LLDP.MgmtAddress", addr)
+					chassisLLDPMetadata.MgmtAddress = addr
 				}
 			}
 
 			if lldp8201Q, err := lldpLayerInfo.Decode8021(); err == nil {
 				if lldp8201Q.LinkAggregation.Supported {
-					common.SetField(portMetadata, "LLDP.LinkAggregation", map[string]interface{}{
-						"Enabled":   lldp8201Q.LinkAggregation.Enabled,
-						"PortID":    int64(lldp8201Q.LinkAggregation.PortID),
-						"Supported": lldp8201Q.LinkAggregation.Supported,
-					})
+					portLLDPMetadata.LinkAggregation = &LinkAggregationMetadata{
+						Enabled:   lldp8201Q.LinkAggregation.Enabled,
+						PortID:    int64(lldp8201Q.LinkAggregation.PortID),
+						Supported: lldp8201Q.LinkAggregation.Supported,
+					}
 				}
 
 				if lldp8201Q.PVID != 0 {
-					common.SetField(portMetadata, "LLDP.PVID", int64(lldp8201Q.PVID))
+					portLLDPMetadata.PVID = int64(lldp8201Q.PVID)
 				}
 
 				if lldp8201Q.VIDUsageDigest != 0 {
-					common.SetField(portMetadata, "LLDP.VIDUsageDigest", int64(lldp8201Q.VIDUsageDigest))
+					portLLDPMetadata.VIDUsageDigest = int64(lldp8201Q.VIDUsageDigest)
 				}
 
 				if lldp8201Q.ManagementVID != 0 {
-					common.SetField(portMetadata, "LLDP.ManagementVID", int64(lldp8201Q.ManagementVID))
+					portLLDPMetadata.ManagementVID = int64(lldp8201Q.ManagementVID)
 				}
 
 				if len(lldp8201Q.VLANNames) != 0 {
-					vlanNames := make([]interface{}, len(lldp8201Q.VLANNames))
+					portLLDPMetadata.VLANNames = make([]VLANNameMetadata, len(lldp8201Q.VLANNames))
 					for i, vlan := range lldp8201Q.VLANNames {
-						vlanNames[i] = map[string]interface{}{
-							"ID":   vlan.ID,
-							"Name": bytesToString([]byte(vlan.Name)),
-						}
+						portLLDPMetadata.VLANNames[i].ID = int64(vlan.ID)
+						portLLDPMetadata.VLANNames[i].Name = bytesToString([]byte(vlan.Name))
 					}
-					common.SetField(portMetadata, "LLDP.VLANNames", vlanNames)
 				}
 
 				if len(lldp8201Q.PPVIDs) != 0 {
-					ppvids := make([]interface{}, len(lldp8201Q.PPVIDs))
+					portLLDPMetadata.PPVIDs = make([]PPVIDMetadata, len(lldp8201Q.PPVIDs))
 					for i, ppvid := range lldp8201Q.PPVIDs {
-						ppvids[i] = map[string]interface{}{
-							"Enabled":   ppvid.Enabled,
-							"ID":        int64(ppvid.ID),
-							"Supported": ppvid.Supported,
-						}
+						portLLDPMetadata.PPVIDs[i].Enabled = ppvid.Enabled
+						portLLDPMetadata.PPVIDs[i].ID = int64(ppvid.ID)
+						portLLDPMetadata.PPVIDs[i].Supported = ppvid.Supported
 					}
-					common.SetField(portMetadata, "LLDP.PPVIDs", ppvids)
 				}
 			}
 
@@ -250,7 +258,7 @@ func (p *Probe) handlePacket(n *graph.Node, ifName string, packet gopacket.Packe
 
 		// TODO: Handle TTL (set port to down when timer expires ?)
 
-		p.g.Lock()
+		p.Ctx.Graph.Lock()
 
 		// Create a node for the sending chassis with a predictable ID
 		// Some switches - such as Cisco Nexus - sends a different chassis ID
@@ -269,16 +277,16 @@ func (p *Probe) handlePacket(n *graph.Node, ifName string, packet gopacket.Packe
 			portID, lldpLayer.PortID.Subtype.String(),
 		), portMetadata)
 
-		if !topology.HaveOwnershipLink(p.g, chassis, port) {
-			topology.AddOwnershipLink(p.g, chassis, port, nil)
-			topology.AddLayer2Link(p.g, chassis, port, nil)
+		if !topology.HaveOwnershipLink(p.Ctx.Graph, chassis, port) {
+			topology.AddOwnershipLink(p.Ctx.Graph, chassis, port, nil)
+			topology.AddLayer2Link(p.Ctx.Graph, chassis, port, nil)
 		}
 
-		if !topology.HaveLayer2Link(p.g, port, n) {
-			topology.AddLayer2Link(p.g, port, n, nil)
+		if !topology.HaveLayer2Link(p.Ctx.Graph, port, n) {
+			topology.AddLayer2Link(p.Ctx.Graph, port, n, nil)
 		}
 
-		p.g.Unlock()
+		p.Ctx.Graph.Unlock()
 	}
 }
 
@@ -294,7 +302,13 @@ func (p *Probe) startCapture(ifName, mac string, n *graph.Node) error {
 	// Set BPF filter to only capture LLDP packets
 	bpfFilter := fmt.Sprintf(lldpBPFFilter, mac)
 
-	packetProbe, err := probes.NewGoPacketProbe(p.g, n, probes.AFPacket, bpfFilter, lldpSnapLen)
+	ctx := probes.Context{
+		Config: p.Ctx.Config,
+		Logger: p.Ctx.Logger,
+		Graph:  p.Ctx.Graph,
+	}
+
+	packetProbe, err := probes.NewGoPacketProbe(ctx, n, probes.AFPacket, bpfFilter, lldpSnapLen)
 	if err != nil {
 		return err
 	}
@@ -306,7 +320,7 @@ func (p *Probe) startCapture(ifName, mac string, n *graph.Node) error {
 
 	go func() {
 		defer func() {
-			logging.GetLogger().Infof("Stopping LLDP capture on %s", ifName)
+			p.Ctx.Logger.Infof("Stopping LLDP capture on %s", ifName)
 
 			p.Lock()
 			p.interfaceMap[ifName] = nil
@@ -315,25 +329,27 @@ func (p *Probe) startCapture(ifName, mac string, n *graph.Node) error {
 			p.wg.Done()
 		}()
 
-		packetProbe.Run(func(packet gopacket.Packet) {
+		if err := packetProbe.Run(func(packet gopacket.Packet) {
 			p.handlePacket(n, ifName, packet)
-		}, nil)
+		}, &lldpCapture{}); err != nil {
+			p.Ctx.Logger.Errorf("LLDP capture error on %s", ifName)
+		}
 	}()
 
 	return err
 }
 
 func (p *Probe) getOrCreate(id graph.Identifier, m graph.Metadata) *graph.Node {
-	node := p.g.GetNode(id)
+	node := p.Ctx.Graph.GetNode(id)
 	if node == nil {
 		var err error
 
-		node, err = p.g.NewNode(id, m)
+		node, err = p.Ctx.Graph.NewNode(id, m)
 		if err != nil {
-			logging.GetLogger().Error(err)
+			p.Ctx.Logger.Error(err)
 		}
 	} else {
-		tr := p.g.StartMetadataTransaction(node)
+		tr := p.Ctx.Graph.StartMetadataTransaction(node)
 		for k, v := range m {
 			tr.AddMetadata(k, v)
 		}
@@ -347,6 +363,10 @@ func (p *Probe) getOrCreate(id graph.Identifier, m graph.Metadata) *graph.Node {
 // - when its first packet layer is Ethernet and it has a MAC address
 // - when the interface is listed in the configuration file or we are in auto discovery mode
 func (p *Probe) handleNode(n *graph.Node) {
+	if state, _ := n.GetFieldString("State"); state != "UP" {
+		return
+	}
+
 	firstLayerType, _ := probes.GoPacketFirstLayerType(n)
 	mac, _ := n.GetFieldString("BondSlave.PermMAC")
 	if mac == "" {
@@ -356,9 +376,9 @@ func (p *Probe) handleNode(n *graph.Node) {
 
 	if name != "" && mac != "" && firstLayerType == layers.LayerTypeEthernet {
 		if activeProbe, found := p.interfaceMap[name]; (found || p.autoDiscovery) && activeProbe == nil {
-			logging.GetLogger().Infof("Starting LLDP capture on %s (MAC: %s)", name, mac)
+			p.Ctx.Logger.Infof("Starting LLDP capture on %s (MAC: %s)", name, mac)
 			if err := p.startCapture(name, mac, n); err != nil {
-				logging.GetLogger().Error(err)
+				p.Ctx.Logger.Error(err)
 			}
 		}
 	}
@@ -370,9 +390,9 @@ func (p *Probe) OnEdgeAdded(e *graph.Edge) {
 	defer p.Unlock()
 
 	// Only consider nodes that are owned by the host node
-	if e.Parent == p.hostNode.ID {
+	if e.Parent == p.Ctx.RootNode.ID {
 		if relationType, _ := e.GetFieldString("RelationType"); relationType == topology.OwnershipLink {
-			n := p.g.GetNode(e.Child)
+			n := p.Ctx.Graph.GetNode(e.Child)
 			p.handleNode(n)
 		}
 	}
@@ -383,26 +403,23 @@ func (p *Probe) OnNodeUpdated(n *graph.Node) {
 	p.Lock()
 	defer p.Unlock()
 
-	// If the interface was modified from down to up
-	if state, _ := n.GetFieldString("State"); state == "UP" {
-		if p.g.AreLinked(p.hostNode, n, topology.OwnershipMetadata()) {
-			p.handleNode(n)
-		}
+	if p.Ctx.Graph.AreLinked(p.Ctx.RootNode, n, topology.OwnershipMetadata()) {
+		p.handleNode(n)
 	}
 }
 
 // Start capturing LLDP packets
 func (p *Probe) Start() {
-	atomic.StoreInt64(&p.state, common.RunningState)
-	p.g.AddEventListener(p)
+	p.state.Store(common.RunningState)
+	p.Ctx.Graph.AddEventListener(p)
 
-	p.g.RLock()
-	defer p.g.RUnlock()
+	p.Ctx.Graph.RLock()
+	defer p.Ctx.Graph.RUnlock()
 	p.Lock()
 	defer p.Unlock()
 
 	// The nodes may have already been created
-	children := p.g.LookupChildren(p.hostNode, nil, topology.OwnershipMetadata())
+	children := p.Ctx.Graph.LookupChildren(p.Ctx.RootNode, nil, topology.OwnershipMetadata())
 	for _, intfNode := range children {
 		p.handleNode(intfNode)
 	}
@@ -410,27 +427,30 @@ func (p *Probe) Start() {
 
 // Stop capturing LLDP packets
 func (p *Probe) Stop() {
-	p.g.RemoveEventListener(p)
-	atomic.StoreInt64(&p.state, common.StoppingState)
+	p.Ctx.Graph.RemoveEventListener(p)
+	p.state.Store(common.StoppingState)
 	for intf, activeProbe := range p.interfaceMap {
-		logging.GetLogger().Debugf("Stopping probe on %s", intf)
-		activeProbe.Stop()
+		if activeProbe != nil {
+			p.Ctx.Logger.Debugf("Stopping probe on %s", intf)
+			activeProbe.Stop()
+		}
 	}
 	p.wg.Wait()
 }
 
-// NewProbe returns a new LLDP probe
-func NewProbe(g *graph.Graph, hostNode *graph.Node, interfaces []string) (*Probe, error) {
+// Init initializes a new LLDP probe
+func (p *Probe) Init(ctx tp.Context, bundle *probe.Bundle) (probe.Handler, error) {
+	interfaces := ctx.Config.GetStringSlice("agent.topology.lldp.interfaces")
+
 	interfaceMap := make(map[string]*probes.GoPacketProbe)
 	for _, intf := range interfaces {
 		interfaceMap[intf] = nil
 	}
 
-	return &Probe{
-		g:             g,
-		hostNode:      hostNode,
-		interfaceMap:  interfaceMap,
-		state:         common.StoppedState,
-		autoDiscovery: len(interfaces) == 0,
-	}, nil
+	p.Ctx = ctx
+	p.interfaceMap = interfaceMap
+	p.state = common.StoppedState
+	p.autoDiscovery = len(interfaces) == 0
+
+	return p, nil
 }

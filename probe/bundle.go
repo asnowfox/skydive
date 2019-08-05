@@ -17,18 +17,35 @@
 
 package probe
 
-import "github.com/skydive-project/skydive/common"
+import (
+	"fmt"
 
-// Probe describes a Probe (topology or flow) mechanism API
-type Probe interface {
+	"github.com/skydive-project/skydive/common"
+)
+
+// ErrProbeNotCompiled is thrown when a flow probe was not compiled within the binary
+var ErrProbeNotCompiled = fmt.Errorf("probe not compiled")
+
+// Handler describes a ProbeHandler. A ProbeHandler aims to create probe
+type Handler interface {
 	Start()
 	Stop()
+}
+
+// ServiceStatus describes the status returned by GetStatus
+type ServiceStatus struct {
+	Status common.ServiceState
+}
+
+// StatusReporter can be implemented by probes to report their status
+type StatusReporter interface {
+	GetStatus() interface{}
 }
 
 // Bundle describes a bundle of probes (topology of flow)
 type Bundle struct {
 	common.RWMutex
-	probes map[string]Probe
+	Handlers map[string]Handler
 }
 
 // Start a bundle of probes
@@ -36,7 +53,7 @@ func (p *Bundle) Start() {
 	p.RLock()
 	defer p.RUnlock()
 
-	for _, probe := range p.probes {
+	for _, probe := range p.Handlers {
 		probe.Start()
 	}
 }
@@ -46,45 +63,61 @@ func (p *Bundle) Stop() {
 	p.RLock()
 	defer p.RUnlock()
 
-	for _, probe := range p.probes {
+	for _, probe := range p.Handlers {
 		probe.Stop()
 	}
 }
 
-// GetProbe retrieve a specific probe name
-func (p *Bundle) GetProbe(name string) Probe {
+// GetHandler retrieve a specific handler
+func (p *Bundle) GetHandler(typ string) Handler {
 	p.RLock()
 	defer p.RUnlock()
 
-	if probe, ok := p.probes[name]; ok {
+	if probe, ok := p.Handlers[typ]; ok {
 		return probe
 	}
 	return nil
 }
 
-//ActiveProbes returns all active probes name
-func (p *Bundle) ActiveProbes() []string {
+// EnabledProbes returns all enabled probes name
+func (p *Bundle) EnabledProbes() []string {
 	p.RLock()
 	defer p.RUnlock()
 
-	activeProbes := make([]string, 0, len(p.probes))
-	for k := range p.probes {
+	activeProbes := make([]string, 0, len(p.Handlers))
+	for k := range p.Handlers {
 		activeProbes = append(activeProbes, k)
 	}
 	return activeProbes
 }
 
-// AddProbe adds a probe to the bundle
-func (p *Bundle) AddProbe(name string, probe Probe) {
+// GetStatus returns the status of all the probes
+func (p *Bundle) GetStatus() map[string]interface{} {
 	p.RLock()
 	defer p.RUnlock()
 
-	p.probes[name] = probe
+	status := make(map[string]interface{})
+	for k, v := range p.Handlers {
+		if v, ok := v.(StatusReporter); ok {
+			status[k] = v.GetStatus()
+		} else {
+			status[k] = &ServiceStatus{Status: common.RunningState}
+		}
+	}
+	return status
 }
 
-// NewBundle creates a new probe bundle
-func NewBundle(p map[string]Probe) *Bundle {
+// AddHandler adds a probe to the bundle
+func (p *Bundle) AddHandler(typ string, handler Handler) {
+	p.Lock()
+	defer p.Unlock()
+
+	p.Handlers[typ] = handler
+}
+
+// NewBundle creates a new probe handler bundle
+func NewBundle() *Bundle {
 	return &Bundle{
-		probes: p,
+		Handlers: make(map[string]Handler),
 	}
 }

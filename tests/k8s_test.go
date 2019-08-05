@@ -72,7 +72,7 @@ func makeHasArgsNode(node *graph.Node, args1 ...interface{}) []interface{} {
 	m := map[string]interface{}(node.Metadata)
 	args := []interface{}{}
 	for _, key := range k8s.MetadataFields("Namespace", "Pod", "Name") {
-		if val, err := common.GetField(m, key); err == nil {
+		if val, err := common.GetMapField(m, key); err == nil {
 			args = append(args, key, val)
 		}
 	}
@@ -173,7 +173,7 @@ func testNodeCreation(t *testing.T, setupCmds, tearDownCmds []Cmd, mngr, typ str
 			m := map[string]interface{}(obj.Metadata)
 			for _, field := range fields {
 				field = k8s.MetadataField(field)
-				if _, err := common.GetField(m, field); err != nil {
+				if _, err := common.GetMapField(m, field); err != nil {
 					return fmt.Errorf("Node '%s %s' missing field: %s", typ, name, field)
 				}
 			}
@@ -192,7 +192,7 @@ func testNodeCreationFromConfig(t *testing.T, mngr, ty string, name interface{},
 
 /* -- test creation of single resource -- */
 func TestK8sClusterNode(t *testing.T) {
-	testNodeCreation(t, nil, nil, k8s.Manager, "cluster", k8s.ClusterName)
+	testNodeCreation(t, nil, nil, k8s.Manager, "cluster", "minikube")
 }
 
 func TestK8sConfigMapNode(t *testing.T) {
@@ -317,7 +317,7 @@ func TestHelloNodeScenario(t *testing.T) {
 		[]CheckFunction{
 			func(c *CheckContext) error {
 				// check nodes exist
-				cluster, err := checkNodeCreation(t, c, k8s.Manager, "cluster", k8s.ClusterName)
+				cluster, err := checkNodeCreation(t, c, k8s.Manager, "cluster", "minikube")
 				if err != nil {
 					return err
 				}

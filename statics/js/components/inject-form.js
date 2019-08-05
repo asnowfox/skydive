@@ -215,7 +215,7 @@ Vue.component('inject-form', {
     },
 
     getIP: function(node) {
-      md = node.metadata;
+      md = node.metadata.Neutron ? node.metadata.Neutron : node.metadata;
       ipFamily = this.type.slice(-1);
       if (ipFamily == "4" && "IPV4" in md) {
         return md.IPV4[0];
@@ -227,6 +227,7 @@ Vue.component('inject-form', {
     },
 
     getMAC: function(node) {
+      if (node.metadata.ExtID && node.metadata.ExtID["attached-mac"]) return node.metadata.ExtID["attached-mac"];
       return node.metadata.MAC || "";
     },
 
@@ -252,6 +253,8 @@ Vue.component('inject-form', {
       if (this.mode == "random") {
         this.payload = "x".repeat(this.payloadlength);
       }
+      var ttl = this.interval*this.count;
+      var headers = {"X-Resource-TTL": ttl + 5000 + "ms"};
       $.ajax({
         dataType: "json",
         url: '/api/injectpacket',
@@ -270,14 +273,14 @@ Vue.component('inject-form', {
           "Increment": this.increment,
           "Interval": this.interval,
           "Payload": this.payload,
-          "incrementPayload": this.incrementPayload,
+          "IncrementPayload": this.incrementPayload,
         }),
+        headers: headers,
         contentType: "application/json; charset=utf-8",
         method: 'POST',
       })
       .then(function() {
         self.$success({message: 'Packet injected'});
-        app.$emit("refresh-injector-list");
       })
       .fail(function(e) {
         self.$error({message: 'Packet injection error: ' + e.responseText});

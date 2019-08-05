@@ -158,6 +158,7 @@
           cd src/github.com/skydive-project/skydive
           . scripts/ci/install-go.sh
           [[ "$ghprbCommentBody" = *"insanelock"* ]] && export TAGS=mutexdebug
+          [[ "$ghprbCommentBody" = *"profile"* ]] && export WITH_PROF=true
           {test}
 
 - parameter:
@@ -349,7 +350,7 @@
     builders:
       - skydive-cleanup
       - skydive-test:
-          test: BACKEND=elasticsearch scripts/ci/run-functional-tests.sh
+          test: BACKEND=elasticsearch ARGS="-ovs.oflow.native" scripts/ci/run-functional-tests.sh
     publishers:
       - junit:
           results: tests.xml
@@ -367,7 +368,7 @@
     builders:
       - skydive-cleanup
       - skydive-test:
-          test: BACKEND=orientdb ARGS="-ovs.oflow.native" scripts/ci/run-functional-tests.sh
+          test: BACKEND=orientdb scripts/ci/run-functional-tests.sh
     publishers:
       - junit:
           results: tests.xml
@@ -413,6 +414,9 @@
           allow-empty: 'true'
       - archive:
           artifacts: 'src/github.com/skydive-project/skydive/tests/overview.gif'
+          allow-empty: 'true'
+      - archive:
+          artifacts: 'src/github.com/skydive-project/skydive/tests/graph.json'
           allow-empty: 'true'
 
 - job:
@@ -763,7 +767,7 @@
     triggers:
       - skydive-pull-request:
           name: ppc64le-tests
-          trigger-prefix: "(all )?"
+          trigger-prefix: "ppc64le "
           only-trigger-phrase: true
           cancel-builds-on-update: true
     builders:
@@ -796,7 +800,7 @@
     builders:
       - skydive-cleanup
       - skydive-test:
-          test: BACKEND=elasticsearch WITH_EBPF=true WITH_VPP=true TEST_PATTERN='\(EBPF\|SRIOV\|VPP\|Libvirt\)' TAGS="$TAGS libvirt_tests sriov_tests" scripts/ci/run-functional-tests.sh
+          test: BACKEND=elasticsearch WITH_EBPF=true WITH_VPP=true TEST_PATTERN='(EBPF|SRIOV|VPP|Libvirt)' TAGS="$TAGS libvirt_tests sriov_tests" scripts/ci/run-functional-tests.sh
     publishers:
       - junit:
           results: tests.xml

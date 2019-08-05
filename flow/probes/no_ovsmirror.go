@@ -30,12 +30,12 @@ type OvsMirrorProbesHandler struct {
 }
 
 // RegisterProbe registers a gopacket probe
-func (p *OvsMirrorProbesHandler) RegisterProbe(n *graph.Node, capture *types.Capture, e FlowProbeEventHandler) error {
-	return common.ErrNotImplemented
+func (p *OvsMirrorProbesHandler) RegisterProbe(n *graph.Node, capture *types.Capture, e ProbeEventHandler) (Probe, error) {
+	return nil, common.ErrNotImplemented
 }
 
 // UnregisterProbe unregisters gopacket probe
-func (p *OvsMirrorProbesHandler) UnregisterProbe(n *graph.Node, e FlowProbeEventHandler) error {
+func (p *OvsMirrorProbesHandler) UnregisterProbe(n *graph.Node, e ProbeEventHandler, fp Probe) error {
 	return common.ErrNotImplemented
 }
 
@@ -47,7 +47,12 @@ func (p *OvsMirrorProbesHandler) Start() {
 func (p *OvsMirrorProbesHandler) Stop() {
 }
 
-// NewOvsMirrorProbesHandler creates a new OVS Mirror probes
-func NewOvsMirrorProbesHandler(g *graph.Graph, tb, fb *probe.Bundle) (*OvsMirrorProbesHandler, error) {
+// CaptureTypes supported
+func (p *OvsMirrorProbesHandler) CaptureTypes() []string {
+	return []string{}
+}
+
+// Init initializes a new OVS Mirror probe
+func (o *OvsMirrorProbesHandler) Init(ctx Context, bundle *probe.Bundle) (FlowProbeHandler, error) {
 	return nil, common.ErrNotImplemented
 }

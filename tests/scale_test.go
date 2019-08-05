@@ -234,7 +234,7 @@ func checkIPerfFlows(gh *gclient.GremlinQueryHelper, flowExpected int) error {
 
 func checkCaptures(gh *gclient.GremlinQueryHelper, captureExpected int) error {
 	retry := func() error {
-		nodes, err := gh.GetNodes(g.G.V().Has("Capture.State", "active"))
+		nodes, err := gh.GetNodes(g.G.V().Has("Captures.State", "active"))
 		if err != nil {
 			return err
 		}
@@ -312,7 +312,7 @@ func TestScaleHA(t *testing.T) {
 	gh := gclient.NewGremlinQueryHelper(authOptions)
 
 	// expected 1 either Incomer or Outgoer
-	if err = common.Retry(func() error { return checkPeers(client, 1, common.RunningState) }, 5, time.Second); err != nil {
+	if err = common.Retry(func() error { return checkPeers(client, 1, websocket.ConnState(common.RunningState)) }, 5, time.Second); err != nil {
 		execCmds(t, tearDownCmds...)
 		t.Fatal(err)
 	}
@@ -326,7 +326,7 @@ func TestScaleHA(t *testing.T) {
 	// start a capture
 	capture := types.NewCapture(g.G.V().Has("Type", "netns", "Name", "vm1").Out().Has("Name", "eth0").String(), "")
 	capture.Type = "pcap"
-	if err = client.Create("capture", capture); err != nil {
+	if err = client.Create("capture", capture, nil); err != nil {
 		execCmds(t, tearDownCmds...)
 		t.Fatal(err)
 	}
@@ -405,7 +405,7 @@ func TestScaleHA(t *testing.T) {
 	}
 	execCmds(t, setupCmds...)
 
-	if err = checkPeers(client, 0, common.RunningState); err != nil {
+	if err = checkPeers(client, 0, websocket.ConnState(common.RunningState)); err != nil {
 		execCmds(t, tearDownCmds...)
 		t.Fatal(err)
 	}
@@ -453,7 +453,7 @@ func TestScaleHA(t *testing.T) {
 	execCmds(t, setupCmds...)
 
 	if err = common.Retry(func() error {
-		return checkPeers(client, 1, common.RunningState)
+		return checkPeers(client, 1, websocket.ConnState(common.RunningState))
 	}, 15, time.Second); err != nil {
 		execCmds(t, tearDownCmds...)
 		t.Fatal(err)
@@ -487,7 +487,7 @@ func TestScaleHA(t *testing.T) {
 	// restart a capture on all eth0
 	capture = types.NewCapture(g.G.V().Has("Type", "netns", "Name", "vm1").Out().Has("Name", "eth0").String(), "")
 	capture.Type = "pcap"
-	if err = client.Create("capture", capture); err != nil {
+	if err = client.Create("capture", capture, nil); err != nil {
 		t.Fatal(err)
 	}
 

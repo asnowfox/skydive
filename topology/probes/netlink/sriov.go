@@ -41,7 +41,7 @@ type pendingVf struct {
 	vfid int
 }
 
-// PciFromString transforms the symbolic representation of a pci addres
+// PciFromString transforms the symbolic representation of a pci address
 // in an unsigned integer.
 func PciFromString(businfo string) (uint32, error) {
 	var domain, bus, device, function uint32
@@ -101,7 +101,7 @@ var errZeroVfs = errors.New("zero VFS")
 
 /* handleSriov adds a node for each virtual function declared. It takes
    care of finding the PCI address of each VF */
-func (u *NetNsProbe) handleSriov(
+func (u *Probe) handleSriov(
 	graph *graph.Graph,
 	intf *graph.Node,
 	id int,
@@ -181,17 +181,17 @@ func (u *NetNsProbe) handleSriov(
 		return
 	}
 
-	vfs := make([]interface{}, numVfs)
-	for i, vf := range attrsVfs {
-		vfs[i] = map[string]interface{}{
-			"ID":        int64(vf.ID),
-			"LinkState": int64(vf.LinkState),
-			"MAC":       vf.Mac.String(),
-			"Qos":       int64(vf.Qos),
-			"Spoofchk":  vf.Spoofchk,
-			"TxRate":    int64(vf.TxRate),
-			"Vlan":      int64(vf.Vlan),
-		}
+	var vfs VFS
+	for _, vf := range attrsVfs {
+		vfs = append(vfs, &VF{
+			ID:        int64(vf.ID),
+			LinkState: int64(vf.LinkState),
+			MAC:       vf.Mac.String(),
+			Qos:       int64(vf.Qos),
+			Spoofchk:  vf.Spoofchk,
+			TxRate:    int64(vf.TxRate),
+			Vlan:      int64(vf.Vlan),
+		})
 	}
 
 	graph.Lock()

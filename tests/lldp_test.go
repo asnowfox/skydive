@@ -27,20 +27,23 @@ import (
 func TestLLDP(t *testing.T) {
 	test := &Test{
 		setupCmds: []Cmd{
-			{"ip link add lldp0 type dummy", false},
-			{"ip link set lldp0 up", false},
-			{"ip link set multicast on dev lldp0", false},
-			{"ip addr add 10.10.20.1/24 dev lldp0", false},
-			{"sleep 3", false}, // give some time to the LLDP probe to start capturing packets
+			{"ip netns add lldp-vm", true},
+			{"ip link add name lldp0 type veth peer name eth0 netns lldp-vm", true},
+			{"ip link set lldp0 up", true},
+			{"ip netns exec lldp-vm ip link set eth0 up", true},
+			{"ip link set multicast on dev lldp0", true},
+			{"ip addr add 10.10.20.1/24 dev lldp0", true},
 		},
 
 		tearDownCmds: []Cmd{
-			{"ip link del lldp0", false},
+			{"ip link del lldp0", true},
+			{"ip netns del lldp-vm", true},
 		},
 
 		injections: []TestInjection{{
-			from: g.G.V().Has("Name", "lldp0"),
-			pcap: "pcaptraces/lldp-detailed.pcap",
+			from:  g.G.V().Has("Name", "lldp0"),
+			pcap:  "pcaptraces/lldp-detailed.pcap",
+			count: 20,
 		}},
 
 		mode: Replay,

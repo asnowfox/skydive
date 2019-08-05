@@ -49,16 +49,30 @@ PROTEUS_GITHUB:=gopkg.in/src-d/proteus.v1/cli/proteus
 EASYJSON_GITHUB:=github.com/mailru/easyjson/easyjson
 EASYJSON_FILES_ALL=flow/flow.pb.go
 EASYJSON_FILES_TAG=\
+	api/types/types.go \
+	flow/ondemand/ondemand.go \
+	flow/probes/probes.go \
 	flow/storage/elasticsearch/elasticsearch.go \
 	flow/storage/orientdb/orientdb.go \
 	graffiti/graph/elasticsearch.go \
+	ondemand/ondemand.go \
+	packetinjector/injector.go \
 	sflow/sflow.go \
 	topology/metrics.go \
-	topology/probes/netlink/route.go \
-	topology/probes/netlink/neighbor.go \
-	topology/probes/ovsdb/ovsdb.go
-EASYJSON_FILES_TAG_LINUX=\
-	topology/probes/netlink/netlink.go \
+	topology/neighbors.go \
+	topology/nexthop.go \
+	topology/routes.go \
+	topology/probes/docker/metadata.go \
+	topology/probes/libvirt/metadata.go \
+	topology/probes/lldp/metadata.go \
+	topology/probes/lxd/metadata.go \
+	topology/probes/netlink/metadata.go \
+	topology/probes/neutron/neutron.go \
+	topology/probes/nsm/nsm.go \
+	topology/probes/opencontrail/metadata.go \
+	topology/probes/ovn/ovn.go \
+	topology/probes/ovsdb/ovsdb.go \
+	topology/probes/runc/metadata.go \
 	topology/probes/socketinfo/connection.go
 EASYJSON_FILES_TAG_OPENCONTRAIL=\
 	topology/probes/opencontrail/routing_table.go
@@ -74,9 +88,12 @@ ifeq ($(COVERAGE), true)
   TEST_COVERPROFILE?=../functionals.cover
   EXTRA_ARGS+=-test.coverprofile=${TEST_COVERPROFILE}
 endif
+ifeq ($(WITH_PROF), true)
+  EXTRA_ARGS+=-profile
+endif
 TIMEOUT?=1m
 TEST_PATTERN?=
-UT_PACKAGES?=$(shell $(GOVENDOR) list -no-status +local | grep -v '/tests')
+UT_PACKAGES?=$(shell $(GOVENDOR) list -no-status +local | grep -Ev '/tests|/contrib')
 FUNC_TESTS_CMD:="grep -e 'func Test${TEST_PATTERN}' tests/*.go | perl -pe 's|.*func (.*?)\(.*|\1|g' | shuf"
 FUNC_TESTS:=$(shell sh -c $(FUNC_TESTS_CMD))
 DOCKER_IMAGE?=skydive/skydive
@@ -91,7 +108,7 @@ BUILD_TAGS?=$(TAGS)
 WITH_LXD?=true
 WITH_OPENCONTRAIL?=true
 WITH_LIBVIRT_GO?=true
-WITH_EBPF_DOCKER_BUILDER?=false
+WITH_EBPF_DOCKER_BUILDER?=true
 WITH_VPP?=false
 
 export PATH:=$(BUILD_TOOLS):$(PATH)
@@ -194,6 +211,12 @@ ifeq ($(WITH_VPP), true)
   AGENT_TEST_EXTRA_PROBES+=vpp
 endif
 
+ifeq (${DEBUG}, true)
+GOFLAGS=-gcflags='-N -l'
+GO_BINDATA_FLAGS+=-debug
+export DEBUG
+endif
+
 comma:= ,
 empty:=
 space:= $(empty) $(empty)
@@ -211,22 +234,25 @@ version:
 skydive.yml: etc/skydive.yml.default
 	[ -e $@ ] || cp $< $@
 
-.PHONY: debug
-debug: GOFLAGS+=-gcflags='-N -l'
-debug: GO_BINDATA_FLAGS+=-debug
-debug: skydive skydive.yml
+DLV_FLAGS=--check-go-version=false
 
-define skydive_debug
-sudo $$(which dlv) exec $$(which skydive) -- $1 -c skydive.yml
+ifeq (${DEBUG}, true)
+define skydive_run
+sudo -E $$(which dlv) $(DLV_FLAGS) exec $$(which skydive) -- $1 -c skydive.yml
 endef
+else
+define skydive_run
+sudo -E $$(which skydive) $1 -c skydive.yml
+endef
+endif
 
 .PHONY: debug.agent
-debug.agent:
-	$(call skydive_debug,agent)
+run.agent:
+	$(call skydive_run,agent)
 
 .PHONY: debug.analyzer
-debug.analyzer:
-	$(call skydive_debug,analyzer)
+run.analyzer:
+	$(call skydive_run,analyzer)
 
 %.pb.go: %.proto
 	$(call PROTOC_GEN,$<)
@@ -249,15 +275,13 @@ flow/flow.pb.go: flow/flow.proto filters/filters.proto
 	sed -e 's/type Flow struct {/type Flow struct { XXX_state flowState `json:"-"`/' -i $@
 	# to fix generated layers import
 	sed -e 's/layers "flow\/layers"/layers "github.com\/skydive-project\/skydive\/flow\/layers"/' -i $@
+	sed -e 's/type FlowMetric struct {/\/\/ gendecoder\ntype FlowMetric struct {/' -i $@
+	sed -e 's/type FlowLayer struct {/\/\/ gendecoder\ntype FlowLayer struct {/' -i $@
+	sed -e 's/type TransportLayer struct {/\/\/ gendecoder\ntype TransportLayer struct {/' -i $@
+	sed -e 's/type ICMPLayer struct {/\/\/ gendecoder\ntype ICMPLayer struct {/' -i $@
+	sed -e 's/type IPMetric struct {/\/\/ gendecoder\ntype IPMetric struct {/' -i $@
+	sed -e 's/type TCPMetric struct {/\/\/ gendecoder\ntype TCPMetric struct {/' -i $@
 	gofmt -s -w $@
-
-flow/layers/generated.proto: flow/layers/layers.go
-	$(call VENDOR_RUN,${PROTEUS_GITHUB}) proteus proto -f $${GOPATH}/src -p github.com/skydive-project/skydive/flow/layers
-	sed -e 's/^package .*;/package layers;/' -i $@
-	sed -e 's/^option go_package = "layers"/option go_package = "github.com\/skydive-project\/skydive\/flow\/layers"/' -i $@
-	sed -e 's/^message Layer/message /' -i $@
-	sed -e 's/option (gogoproto.typedecl) = false;//' -i $@
-	sed 's/\((gogoproto\.customname) = "\([^\"]*\)"\)/\1, (gogoproto.jsontag) = "\2,omitempty"/' -i $@
 
 websocket/structmessage.pb.go: websocket/structmessage.proto
 	$(call PROTOC_GEN,$<)
@@ -265,7 +289,7 @@ websocket/structmessage.pb.go: websocket/structmessage.proto
 	sed -e 's/type StructMessage struct {/type StructMessage struct { XXX_state structMessageState `json:"-"`/' -i websocket/structmessage.pb.go
 	gofmt -s -w $@
 
-.proto: govendor flow/layers/generated.pb.go flow/flow.pb.go filters/filters.pb.go websocket/structmessage.pb.go
+.proto: govendor flow/layers/dns.pb.go flow/layers/vrrpv2.pb.go flow/layers/dhcpv4.pb.go flow/flow.pb.go filters/filters.pb.go websocket/structmessage.pb.go
 
 .PHONY: .proto.clean
 .proto.clean:
@@ -274,7 +298,6 @@ websocket/structmessage.pb.go: websocket/structmessage.proto
 
 GEN_EASYJSON_FILES_ALL := $(patsubst %.go,%_easyjson.go,$(EASYJSON_FILES_ALL))
 GEN_EASYJSON_FILES_TAG := $(patsubst %.go,%_easyjson.go,$(EASYJSON_FILES_TAG))
-GEN_EASYJSON_FILES_TAG_LINUX := $(patsubst %.go,%_easyjson.go,$(EASYJSON_FILES_TAG_LINUX))
 GEN_EASYJSON_FILES_TAG_OPENCONTRAIL := $(patsubst %.go,%_easyjson.go,$(EASYJSON_FILES_TAG_OPENCONTRAIL))
 
 %_easyjson.go: %.go
@@ -282,6 +305,9 @@ GEN_EASYJSON_FILES_TAG_OPENCONTRAIL := $(patsubst %.go,%_easyjson.go,$(EASYJSON_
 
 flow/flow.pb_easyjson.go: flow/flow.pb.go
 	$(call VENDOR_RUN,${EASYJSON_GITHUB}) easyjson -all $<
+
+topology/probes/lldp/lldp_easyjson.go: topology/probes/lldp/lldp.go
+	$(call VENDOR_RUN,${EASYJSON_GITHUB}) easyjson -build_tags linux $<
 
 topology/probes/netlink/netlink_easyjson.go: topology/probes/netlink/netlink.go
 	$(call VENDOR_RUN,${EASYJSON_GITHUB}) easyjson -build_tags linux $<
@@ -296,7 +322,7 @@ topology/probes/ovsdb/ovsdb.pb_easyjson.go: topology/probes/ovsdb/ovsdb.go
 	$(call VENDOR_RUN,${EASYJSON_GITHUB}) easyjson $<
 
 .PHONY: .easyjson
-.easyjson: flow/flow.pb_easyjson.go $(GEN_EASYJSON_FILES_TAG) $(GEN_EASYJSON_FILES_TAG_LINUX) $(GEN_EASYJSON_FILES_TAG_OPENCONTRAIL)
+.easyjson: flow/flow.pb_easyjson.go $(GEN_EASYJSON_FILES_TAG) $(GEN_EASYJSON_FILES_TAG_OPENCONTRAIL)
 
 .PHONY: .easyjson.clean
 .easyjson.clean:
@@ -344,8 +370,27 @@ statics/bindata.go: .typescript ebpf.build $(shell find statics -type f \( ! -in
 
 .PHONY: .vppbinapi
 .vppbinapi: binapigenerator
-	$(GOVENDOR) generate -tags "${BUILD_TAGS}" \
-		github.com/skydive-project/skydive/topology/probes/vpp
+	$(GOVENDOR) generate -tags "${BUILD_TAGS}" ${SKYDIVE_GITHUB}/topology/probes/vpp
+
+.PHONY: .go-generate
+.go-generate:
+	$(GO_GET) github.com/gomatic/renderizer/cmd/renderizer
+	$(GOVENDOR) generate -tags="${BUILD_TAGS}" ${SKYDIVE_GITHUB}/...
+
+.PHONY: .go-generate.clean
+.go-generate.clean:
+	find . \( -name *_gendecoder.go ! -path './vendor/*' \) -exec rm {} \;
+
+.PHONY: swagger
+swagger: .go-generate
+	$(GO_GET) github.com/go-swagger/go-swagger/cmd/swagger
+	swagger generate spec -m -o /tmp/swagger.json
+	for def in `ls api/server/*_swagger.json`; do \
+		jq -s  '.[0] * .[1] * {tags: (.[0].tags + .[1].tags)}' /tmp/swagger.json $$def > swagger.json; \
+		cp swagger.json /tmp; \
+	done
+	jq -s  '.[0] * .[1]' /tmp/swagger.json api/server/swagger_base.json > swagger.json
+	sed -i 's/easyjson:json//g' swagger.json
 
 .PHONY: compile
 compile:
@@ -391,14 +436,42 @@ static: skydive.clean govendor genlocalfiles
 	$(MAKE) compile.static WITH_LIBVIRT_GO=false
 
 .PHONY: contribs.clean
-contribs.clean:
-	$(MAKE) -C contrib/snort clean
-	$(MAKE) -C contrib/objectstore clean
+contribs.clean: contrib.objectstore.clean contrib.snort.clean contrib.collectd.clean
+
+.PHONY: contribs.test
+contribs.test: contrib.objectstore.test
 
 .PHONY: contribs
-contribs: govendor genlocalfiles
+contribs: contrib.objectstore contrib.snort contrib.collectd
+
+.PHONY: contrib.objectstore.clean
+contrib.objectstore.clean:
+	$(MAKE) -C contrib/pipelines/secadvisor clean
+
+.PHONY: contrib.objectstore
+contrib.objectstore: govendor genlocalfiles
+	$(MAKE) -C contrib/pipelines/secadvisor
+
+.PHONY: contrib.objectstore.test
+contrib.objectstore.test: govendor genlocalfiles
+	$(MAKE) -C contrib/pipelines/core test
+	$(MAKE) -C contrib/pipelines/secadvisor test
+
+.PHONY: contribs.snort.clean
+contrib.snort.clean:
+	$(MAKE) -C contrib/snort clean
+
+.PHONY: contrib.snort
+contrib.snort:govendor genlocalfiles
 	$(MAKE) -C contrib/snort
-	$(MAKE) -C contrib/objectstore
+
+.PHONY: contrib.collectd.clean
+contrib.collectd.clean:
+	$(MAKE) -C contrib/collectd clean
+
+.PHONY: contrib.collectd
+contrib.collectd: govendor genlocalfiles
+	$(MAKE) -C contrib/collectd
 
 .PHONY: dpdk.build
 dpdk.build:
@@ -411,12 +484,12 @@ dpdk.clean:
 	$(MAKE) -C dpdk clean
 
 .PHONY: ebpf.build
-ebpf.build:
+ebpf.build: govendor
 ifeq ($(WITH_EBPF), true)
 ifeq ($(WITH_EBPF_DOCKER_BUILDER), true)
-	$(MAKE) -C probe/ebpf clean docker-ebpf-build
+	$(MAKE) -C probe/ebpf docker-ebpf-build
 else
-	$(MAKE) -C probe/ebpf clean ebpf-build
+	$(MAKE) -C probe/ebpf ebpf-build
 endif
 endif
 
@@ -440,9 +513,19 @@ test.functionals.static: govendor genlocalfiles
 		${GOFLAGS} ${VERBOSE_FLAGS} -timeout ${TIMEOUT} \
 		-c -o tests/functionals ./tests/
 
+ifeq (${DEBUG}, true)
+define functionals_run
+cd tests && sudo -E $$(which dlv) $(DLV_FLAGS) exec ./functionals -- $1
+endef
+else
+define functionals_run
+cd tests && sudo -E ./functionals $1
+endef
+endif
+
 .PHONY: test.functionals.run
 test.functionals.run:
-	cd tests && sudo -E ./functionals ${VERBOSE_TESTS_FLAGS} -test.timeout ${TIMEOUT} ${ARGS} ${EXTRA_ARGS}
+	cd tests && sudo -E ./functionals ${VERBOSE_TESTS_FLAGS} -test.run "${TEST_PATTERN}" -test.timeout ${TIMEOUT} ${ARGS} ${EXTRA_ARGS}
 
 .PHONY: tests.functionals.all
 test.functionals.all: test.functionals.compile
@@ -450,11 +533,7 @@ test.functionals.all: test.functionals.compile
 
 .PHONY: test.functionals.batch
 test.functionals.batch: test.functionals.compile
-ifneq ($(TEST_PATTERN),)
-	set -e ; $(MAKE) ARGS="${ARGS} -test.run ${TEST_PATTERN}" test.functionals.run EXTRA_ARGS="${EXTRA_ARGS}"
-else
-	set -e ; $(MAKE) ARGS="${ARGS} " test.functionals.run EXTRA_ARGS="${EXTRA_ARGS}"
-endif
+	set -e ; $(MAKE) ARGS="${ARGS} " test.functionals.run EXTRA_ARGS="${EXTRA_ARGS}" TEST_PATTERN="${TEST_PATTERN}"
 
 .PHONY: test.functionals
 test.functionals: test.functionals.compile
@@ -464,7 +543,7 @@ test.functionals: test.functionals.compile
 
 .PHONY: functional
 functional:
-	$(MAKE) test.functionals VERBOSE=true TIMEOUT=10m ARGS='-standalone -analyzer.topology.backend elasticsearch -analyzer.flow.backend elasticsearch' TEST_PATTERN=${TEST_PATTERN}
+	$(MAKE) test.functionals VERBOSE=true TIMEOUT=10m ARGS='-standalone -analyzer.topology.backend elasticsearch -analyzer.flow.backend elasticsearch' TEST_PATTERN="${TEST_PATTERN}"
 
 .PHONY: test
 test: govendor genlocalfiles
@@ -543,13 +622,13 @@ gometalinter: $(LINTER_COMMANDS)
 .PHONY: lint
 lint: gometalinter
 	@echo "+ $@"
-	gometalinter --disable=gotype ${GOMETALINTER_FLAGS} --vendor -e '.*\.pb.go' -e '.*\._easyjson.go' -e 'statics/bindata.go' --skip=statics/... --deadline 10m --sort=path ./... --json | tee lint.json || true
+	gometalinter --disable=gotype ${GOMETALINTER_FLAGS} --vendor -e '.*\.pb.go' -e '.*\._easyjson.go' -e '.*\._gendecoder.go' -e 'statics/bindata.go' --skip=statics/... --deadline 10m --sort=path ./... --json | tee lint.json || true
 
 .PHONY: genlocalfiles
-genlocalfiles: .proto .bindata .easyjson .vppbinapi
+genlocalfiles: .proto .vppbinapi .go-generate .bindata .easyjson
 
 .PHONY: clean
-clean: skydive.clean test.functionals.clean dpdk.clean contribs.clean ebpf.clean .easyjson.clean .proto.clean .typescript.clean .vppbinapi.clean
+clean: skydive.clean test.functionals.clean dpdk.clean contribs.clean ebpf.clean .easyjson.clean .proto.clean .go-generate.clean .typescript.clean .vppbinapi.clean
 	grep path vendor/vendor.json | perl -pe 's|.*": "(.*?)".*|\1|g' | xargs -n 1 go clean -i >/dev/null 2>&1 || true
 
 .PHONY: srpm
@@ -569,7 +648,9 @@ SKYDIVE_PROTO_FILES:= \
 	flow/flow.proto \
 	filters/filters.proto \
 	websocket/structmessage.proto \
-	flow/layers/generated.proto
+	flow/layers/dns.proto\
+	flow/layers/vrrpv2.proto\
+	flow/layers/dhcpv4.proto
 
 SKYDIVE_TAR_INPUT:= \
 	vendor \
@@ -577,7 +658,6 @@ SKYDIVE_TAR_INPUT:= \
 	$(patsubst %.proto,%.pb.go,$(SKYDIVE_PROTO_FILES)) \
 	$(GEN_EASYJSON_FILES_ALL) \
 	$(GEN_EASYJSON_FILES_TAG) \
-	$(GEN_EASYJSON_FILES_TAG_LINUX) \
 	$(GEN_EASYJSON_FILES_TAG_OPENCONTRAIL)
 
 SKYDIVE_TAR:=${DESTDIR}/$(SKYDIVE_PKG).tar
@@ -586,14 +666,19 @@ define TAR_CMD
 tar $1 -f $(SKYDIVE_TAR) --transform="s||$(SKYDIVE_PATH)|" $2
 endef
 
+define TAR_APPEND
+$(call TAR_CMD,--append,$(SKYDIVE_TAR_INPUT))
+find -type f -name *_gendecoder.go -printf '%P\n' -exec tar --append -f $(SKYDIVE_TAR) --transform="s||$(SKYDIVE_PATH)|" {} \;
+endef
+
 .PHONY: localdist
 localdist: govendor genlocalfiles
 	git ls-files | $(call TAR_CMD,--create,--files-from -)
-	$(call TAR_CMD,--append,$(SKYDIVE_TAR_INPUT))
+	$(call TAR_APPEND,)
 	gzip -f $(SKYDIVE_TAR)
 
 .PHONY: dist
 dist: govendor genlocalfiles
 	git archive -o $(SKYDIVE_TAR) --prefix $(SKYDIVE_PATH) HEAD
-	$(call TAR_CMD,--append,$(SKYDIVE_TAR_INPUT))
+	$(call TAR_APPEND,)
 	gzip -f $(SKYDIVE_TAR)

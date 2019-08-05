@@ -35,27 +35,25 @@ type PcapAPI struct {
 	Storage storage.Storage
 }
 
-func (p *PcapAPI) flowExpireUpdate(flowArray *flow.FlowArray) {
-	if p.Storage != nil && len(flowArray.Flows) > 0 {
-		p.Storage.StoreFlows(flowArray.Flows)
-		logging.GetLogger().Debugf("%d flows stored", len(flowArray.Flows))
+// SendFlows implements the flow Sender interface
+func (p *PcapAPI) SendFlows(flows []*flow.Flow) {
+	if p.Storage != nil && len(flows) > 0 {
+		p.Storage.StoreFlows(flows)
+		logging.GetLogger().Debugf("%d flows stored", len(flows))
 	}
 }
 
 func (p *PcapAPI) injectPcap(w http.ResponseWriter, r *auth.AuthenticatedRequest) {
-	update := config.GetInt("flow.update")
-	expire := config.GetInt("flow.expire")
+	updateEvery := time.Duration(config.GetInt("flow.update")) * time.Second
+	expireAfter := time.Duration(config.GetInt("flow.expire")) * time.Second
 
 	if !rbac.Enforce(r.Username, "pcap", "write") {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
 
-	updateHandler := flow.NewFlowHandler(p.flowExpireUpdate, time.Second*time.Duration(update))
-	expireHandler := flow.NewFlowHandler(p.flowExpireUpdate, time.Second*time.Duration(expire))
-
-	flowtable := flow.NewTable(updateHandler, expireHandler, "", flow.TableOpts{})
-	packetSeqChan, _ := flowtable.Start()
+	flowtable := flow.NewTable(updateEvery, expireAfter, p, flow.UUIDs{}, flow.TableOpts{})
+	packetSeqChan, _, _ := flowtable.Start()
 
 	feeder, err := flow.NewPcapTableFeeder(r.Body, packetSeqChan, false, "")
 	if err != nil {
@@ -70,7 +68,7 @@ func (p *PcapAPI) injectPcap(w http.ResponseWriter, r *auth.AuthenticatedRequest
 	flowtable.Stop()
 
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
-	w.WriteHeader(http.StatusOK)
+	w.WriteHeader(http.StatusAccepted)
 }
 
 func (p *PcapAPI) registerEndpoints(r *shttp.Server, authBackend shttp.AuthenticationBackend) {
@@ -88,6 +86,37 @@ func (p *PcapAPI) registerEndpoints(r *shttp.Server, authBackend shttp.Authentic
 
 // RegisterPcapAPI registers a new pcap injector API
 func RegisterPcapAPI(r *shttp.Server, store storage.Storage, authBackend shttp.AuthenticationBackend) {
+	// swagger:operation POST /pcap injectPCAP
+	//
+	// Inject PCAP
+	//
+	// ---
+	// summary: Inject PCAP
+	//
+	// tags:
+	// - PCAP
+	//
+	// consumes:
+	// - application/octet-stream
+	//
+	// schemes:
+	// - http
+	// - https
+	//
+	// parameters:
+	//   - in: body
+	//     name: status
+	//     required: true
+	//     schema:
+	//       type: string
+	//       format: binary
+	//
+	// responses:
+	//   202:
+	//     description: request accepted
+	//   400:
+	//     description: invalid PCAP
+
 	p := &PcapAPI{
 		Storage: store,
 	}

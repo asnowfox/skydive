@@ -26,10 +26,8 @@ import (
 
 	"github.com/skydive-project/skydive/api/types"
 	"github.com/skydive-project/skydive/common"
-	"github.com/skydive-project/skydive/config"
 	"github.com/skydive-project/skydive/flow"
 	"github.com/skydive-project/skydive/graffiti/graph"
-	"github.com/skydive-project/skydive/logging"
 	"github.com/skydive-project/skydive/ovs/ovsdb"
 	"github.com/skydive-project/skydive/probe"
 	"github.com/skydive-project/skydive/sflow"
@@ -49,17 +47,13 @@ type OvsSFlowProbe struct {
 
 // OvsSFlowProbesHandler describes a flow probe in running in the graph
 type OvsSFlowProbesHandler struct {
-	probes       map[string]OvsSFlowProbe
-	probesLock   common.RWMutex
-	Graph        *graph.Graph
-	Node         *graph.Node
-	fpta         *FlowProbeTableAllocator
+	Ctx          Context
 	ovsClient    *ovsdb.OvsClient
 	allocator    *sflow.AgentAllocator
-	eventHandler FlowProbeEventHandler
+	eventHandler ProbeEventHandler
 }
 
-func newInsertSFlowProbeOP(probe OvsSFlowProbe) (*libovsdb.Operation, error) {
+func newInsertSFlowProbeOP(probe *OvsSFlowProbe) (*libovsdb.Operation, error) {
 	sFlowRow := make(map[string]interface{})
 	sFlowRow["agent"] = probe.Interface
 	sFlowRow["targets"] = probe.Target
@@ -85,11 +79,7 @@ func newInsertSFlowProbeOP(probe OvsSFlowProbe) (*libovsdb.Operation, error) {
 	return &insertOp, nil
 }
 
-func (o *OvsSFlowProbesHandler) registerSFlowProbeOnBridge(probe OvsSFlowProbe, bridgeUUID string) error {
-	o.probesLock.Lock()
-	o.probes[bridgeUUID] = probe
-	o.probesLock.Unlock()
-
+func (o *OvsSFlowProbesHandler) registerSFlowProbeOnBridge(probe *OvsSFlowProbe, bridgeUUID string) error {
 	probeUUID, err := ovsRetrieveSkydiveProbeRowUUID(o.ovsClient, "sFlow", ovsProbeID(bridgeUUID))
 	if err != nil {
 		return err
@@ -101,14 +91,14 @@ func (o *OvsSFlowProbesHandler) registerSFlowProbeOnBridge(probe OvsSFlowProbe, 
 	if probeUUID != "" {
 		uuid = libovsdb.UUID{GoUUID: probeUUID}
 
-		logging.GetLogger().Infof("Using already registered OVS SFlow probe \"%s\"", probe.ID)
+		o.Ctx.Logger.Infof("Using already registered OVS SFlow probe \"%s\"", probe.ID)
 	} else {
 		insertOp, err := newInsertSFlowProbeOP(probe)
 		if err != nil {
 			return err
 		}
 		uuid = libovsdb.UUID{GoUUID: insertOp.UUIDName}
-		logging.GetLogger().Infof("Registering new OVS SFlow probe \"%s\"", probe.ID)
+		o.Ctx.Logger.Infof("Registering new OVS SFlow probe \"%s\"", probe.ID)
 
 		operations = append(operations, *insertOp)
 	}
@@ -133,24 +123,21 @@ func (o *OvsSFlowProbesHandler) registerSFlowProbeOnBridge(probe OvsSFlowProbe, 
 }
 
 // UnregisterSFlowProbeFromBridge unregisters a flow probe from the bridge selected by UUID
-func (o *OvsSFlowProbesHandler) UnregisterSFlowProbeFromBridge(bridgeUUID string) error {
+func (o *OvsSFlowProbesHandler) UnregisterSFlowProbeFromBridge(probe *OvsSFlowProbe) error {
+	bridgeUUID := probe.ID
 	o.allocator.Release(bridgeUUID)
 
-	o.probesLock.RLock()
-	probe, ok := o.probes[bridgeUUID]
-	if !ok {
-		o.probesLock.RUnlock()
-		return fmt.Errorf("probe didn't exist on bridgeUUID %s", bridgeUUID)
+	if probe.flowTable != nil {
+		o.Ctx.FTA.Release(probe.flowTable)
 	}
-	o.fpta.Release(probe.flowTable)
-	o.probesLock.RUnlock()
 
 	probeUUID, err := ovsRetrieveSkydiveProbeRowUUID(o.ovsClient, "sFlow", ovsProbeID(bridgeUUID))
 	if err != nil {
 		return err
 	}
+
 	if probeUUID == "" {
-		return nil
+		return fmt.Errorf("No active SFlow probe found on bridge %s", bridgeUUID)
 	}
 
 	operations := []libovsdb.Operation{}
@@ -168,98 +155,87 @@ func (o *OvsSFlowProbesHandler) UnregisterSFlowProbeFromBridge(bridgeUUID string
 
 	operations = append(operations, updateOp)
 	_, err = o.ovsClient.Exec(operations...)
-	if err != nil {
-		return err
-	}
-	return nil
+	return err
 }
 
-// RegisterProbeOnBridge registers a new probe on the OVS bridge
-func (o *OvsSFlowProbesHandler) RegisterProbeOnBridge(bridgeUUID string, tid string, capture *types.Capture, n *graph.Node) error {
+func (o *OvsSFlowProbesHandler) registerProbeOnBridge(bridgeUUID string, tid string, capture *types.Capture, n *graph.Node) (*OvsSFlowProbe, error) {
 	headerSize := flow.DefaultCaptureLength
 	if capture.HeaderSize != 0 {
 		headerSize = uint32(capture.HeaderSize)
 	}
 
-	opts := tableOptsFromCapture(capture)
-	ft := o.fpta.Alloc(tid, opts)
-
 	if capture.SamplingRate < 1 {
 		capture.SamplingRate = math.MaxUint32
 	}
 
-	probe := OvsSFlowProbe{
+	probe := &OvsSFlowProbe{
 		ID:         bridgeUUID,
 		Interface:  "lo",
 		HeaderSize: headerSize,
 		Sampling:   capture.SamplingRate,
 		Polling:    capture.PollingInterval,
-		flowTable:  ft,
 	}
 
-	address := config.GetString("sflow.bind_address")
-	if address == "" {
-		address = "127.0.0.1"
-	}
+	if capture.Target == "" {
+		uuids := flow.UUIDs{NodeTID: tid, CaptureID: capture.UUID}
+		opts := tableOptsFromCapture(capture)
+		probe.flowTable = o.Ctx.FTA.Alloc(uuids, opts)
 
-	addr := common.ServiceAddress{Addr: address, Port: 0}
-	agent, err := o.allocator.Alloc(bridgeUUID, probe.flowTable, capture.BPFFilter, headerSize, &addr, n, o.Graph)
-	if err != nil && err != sflow.ErrAgentAlreadyAllocated {
-		return err
-	}
-
-	probe.Target = agent.GetTarget()
-
-	return o.registerSFlowProbeOnBridge(probe, bridgeUUID)
-}
-
-func isOvsBridge(n *graph.Node) bool {
-	if uuid, _ := n.GetFieldString("UUID"); uuid == "" {
-		return false
-	}
-	if tp, _ := n.GetFieldString("Type"); tp == "ovsbridge" {
-		return true
-	}
-
-	return false
-}
-
-func (o *OvsSFlowProbesHandler) registerProbe(n *graph.Node, capture *types.Capture, e FlowProbeEventHandler) error {
-	tid, _ := n.GetFieldString("TID")
-	if tid == "" {
-		return fmt.Errorf("No TID for node %v", n)
-	}
-
-	if isOvsBridge(n) {
-		if uuid, _ := n.GetFieldString("UUID"); uuid != "" {
-			if err := o.RegisterProbeOnBridge(uuid, tid, capture, n); err != nil {
-				return err
-			}
-			go e.OnStarted()
+		address := o.Ctx.Config.GetString("agent.flow.sflow.bind_address")
+		if address == "" {
+			address = "127.0.0.1"
 		}
+
+		addr := common.ServiceAddress{Addr: address}
+		bfpFilter := NormalizeBPFFilter(capture)
+
+		agent, err := o.allocator.Alloc(bridgeUUID, probe.flowTable, bfpFilter, headerSize, &addr, n, o.Ctx.Graph)
+		if err != nil && err != sflow.ErrAgentAlreadyAllocated {
+			return nil, err
+		}
+
+		probe.Target = agent.GetTarget()
+	} else {
+		probe.Target = capture.Target
 	}
-	return nil
+
+	if err := o.registerSFlowProbeOnBridge(probe, bridgeUUID); err != nil {
+		return nil, err
+	}
+
+	return probe, nil
 }
 
 // RegisterProbe registers a probe on a graph node
-func (o *OvsSFlowProbesHandler) RegisterProbe(n *graph.Node, capture *types.Capture, e FlowProbeEventHandler) error {
-	err := o.registerProbe(n, capture, e)
-	if err != nil {
-		go e.OnError(err)
+func (o *OvsSFlowProbesHandler) RegisterProbe(n *graph.Node, capture *types.Capture, e ProbeEventHandler) (Probe, error) {
+	tid, _ := n.GetFieldString("TID")
+	if tid == "" {
+		return nil, fmt.Errorf("No TID for node %v", n)
 	}
-	return err
+
+	uuid, _ := n.GetFieldString("UUID")
+	if uuid == "" {
+		return nil, fmt.Errorf("Node %s has no attribute 'UUID'", n.ID)
+	}
+
+	probe, err := o.registerProbeOnBridge(uuid, tid, capture, n)
+	if err != nil {
+		return nil, err
+	}
+
+	go e.OnStarted(&CaptureMetadata{})
+
+	return probe, nil
 }
 
 // UnregisterProbe at the graph node
-func (o *OvsSFlowProbesHandler) UnregisterProbe(n *graph.Node, e FlowProbeEventHandler) error {
-	if isOvsBridge(n) {
-		if uuid, _ := n.GetFieldString("UUID"); uuid != "" {
-			if err := o.UnregisterSFlowProbeFromBridge(uuid); err != nil {
-				return err
-			}
-			go e.OnStopped()
-		}
+func (o *OvsSFlowProbesHandler) UnregisterProbe(n *graph.Node, e ProbeEventHandler, fp Probe) error {
+	if err := o.UnregisterSFlowProbeFromBridge(fp.(*OvsSFlowProbe)); err != nil {
+		return err
 	}
+
+	go e.OnStopped()
+
 	return nil
 }
 
@@ -272,24 +248,27 @@ func (o *OvsSFlowProbesHandler) Stop() {
 	o.allocator.ReleaseAll()
 }
 
-// NewOvsSFlowProbesHandler creates a new OVS SFlow porbes
-func NewOvsSFlowProbesHandler(g *graph.Graph, fpta *FlowProbeTableAllocator, tb *probe.Bundle) (*OvsSFlowProbesHandler, error) {
-	probe := tb.GetProbe("ovsdb")
-	if probe == nil {
-		return nil, errors.New("Agent.ovssflow probe depends on agent.ovsdb topology probe: agent.ovssflow probe can't start properly")
+// CaptureTypes supported
+func (o *OvsSFlowProbesHandler) CaptureTypes() []string {
+	return []string{"ovssflow"}
+}
+
+// Init initializes a new OVS sFlow probe
+func (o *OvsSFlowProbesHandler) Init(ctx Context, bundle *probe.Bundle) (FlowProbeHandler, error) {
+	handler := ctx.TB.GetHandler("ovsdb")
+	if handler == nil {
+		return nil, errors.New("ovssflow probe depends on ovsdb topology probe, probe can't start properly")
 	}
-	p := probe.(*ovsprobe.Probe)
+	p := handler.(*ovsprobe.Probe)
 
 	allocator, err := sflow.NewAgentAllocator()
 	if err != nil {
 		return nil, err
 	}
 
-	return &OvsSFlowProbesHandler{
-		probes:    make(map[string]OvsSFlowProbe),
-		Graph:     g,
-		fpta:      fpta,
-		ovsClient: p.OvsMon.OvsClient,
-		allocator: allocator,
-	}, nil
+	o.Ctx = ctx
+	o.ovsClient = p.OvsMon.OvsClient
+	o.allocator = allocator
+
+	return o, nil
 }

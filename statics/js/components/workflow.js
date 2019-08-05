@@ -17,7 +17,7 @@ Vue.component('item', {
   <div class="form-group">
     <div v-if="Type == 'string'" class="form-group">
       <label :for="Name">{{Description}}</label>
-      <textarea:id="Name" v-model="formData[Name]"></textarea>
+      <textarea :id="Name" type="text" class="form-control input-sm" v-model="formData[Name]"></textarea>
     </div>
     <div v-else-if="Type == 'date'" class="form-group">
     <label :for="Name">{{Description}}</label>
@@ -52,7 +52,12 @@ Vue.component('item', {
         <item v-for="i in item" v-bind="i" :key="i.Name"></item>
       </template>
     </div>
-  </div>`
+  </div>
+  `,
+
+  created() {
+    if (this.Default) this.formData[this.Name] = this.Default
+  },
 })
 
 Vue.component('workflow-params', {
@@ -79,13 +84,37 @@ Vue.component('workflow-params', {
 
   template: `
     <form v-if="workflow.Parameters" @submit.prevent="submit">
-      <h1><span class="workflow-title">{{workflow.Name}}</span></h1>
+      <div class="workflow-abstract">
+        {{ workflow.Abstract }}
+      </div>
+      <vue-markdown class="workflow-description" v-bind:source="workflow.Description" v-bind:postrender="beautifyDesc"/>
+      <h1><span class="workflow-title">Inputs</span></h1>
       <item v-for="item in workflow.Parameters" v-bind="item" :key="item.Name"></item>
       <button type="submit" id="execute" class="btn btn-primary">Execute</button>\
     </form>
   `,
 
   methods: {
+
+    beautifyDesc: function(out) {
+      var i = 0
+      var href = function() {
+        i++;
+        return '<h1 onclick="$(\'#wf-arrow-' + i + '\').toggleClass(\'down\')" \
+          class="workflow-desc-title collapse-header" role="button" data-toggle="collapse" href=".desc-' + i + '">\
+          <span class="pull-left" style="padding-right: 15px">\
+            <i id="wf-arrow-' + i + '" class="glyphicon glyphicon-chevron-right rotate"></i>\
+          </span>';
+      }
+      out = out.replace(/<h1>/g, href);
+
+      i = 0
+      var target = function(match, m1) {
+        i++;
+        return '</h1><' + m1 + ' class="collapse desc-' + i + '">';
+      }
+      return out.replace(/<\/h1>\s*<([a-z]*)>/gm, target);
+    },
 
     submit: function() {
       this.toggleResultDisplay(true);
@@ -158,7 +187,7 @@ Vue.component('workflow-call', {
           <select id="workflow" v-model="currentWorkflow" class="form-control custom-select">
             <option selected :value="{}">Select/Upload a workflow</option>\
             <option value="__upload__">New workflow</option>\
-            <option v-for="(workflow, id) in workflows" :value="workflow">{{ workflow.Name }} ({{ workflow.Description }})</option>
+            <option v-for="(workflow, id) in workflows" :value="workflow">{{ workflow.Name }} - {{ workflow.Title }}</option>
           </select>
         </div>
 

@@ -22,7 +22,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	auth "github.com/abbot/go-http-auth"
@@ -34,8 +33,10 @@ import (
 	"github.com/skydive-project/skydive/rbac"
 )
 
+type clientPromoter func(c *wsIncomingClient) (Speaker, error)
+
 // IncomerHandler incoming client handler interface.
-type IncomerHandler func(*websocket.Conn, *auth.AuthenticatedRequest) (Speaker, error)
+type IncomerHandler func(*websocket.Conn, *auth.AuthenticatedRequest, clientPromoter) (Speaker, error)
 
 // Server implements a websocket server. It owns a Pool of incoming Speakers.
 type Server struct {
@@ -52,6 +53,7 @@ type ServerOpts struct {
 	QueueSize        int
 	PingDelay        time.Duration
 	PongTimeout      time.Duration
+	Logger           logging.Logger
 }
 
 func getRequestParameter(r *http.Request, name string) string {
@@ -63,7 +65,7 @@ func getRequestParameter(r *http.Request, name string) string {
 }
 
 func (s *Server) serveMessages(w http.ResponseWriter, r *auth.AuthenticatedRequest) {
-	logging.GetLogger().Debugf("Enforcing websocket for %s, %s", s.name, r.Username)
+	s.opts.Logger.Debugf("Enforcing websocket for %s, %s", s.name, r.Username)
 	if rbac.Enforce(r.Username, "websocket", s.name) == false {
 		w.Header().Set("Connection", "close")
 		w.WriteHeader(http.StatusForbidden)
@@ -75,13 +77,13 @@ func (s *Server) serveMessages(w http.ResponseWriter, r *auth.AuthenticatedReque
 	if host == "" {
 		host = r.RemoteAddr
 	}
-	logging.GetLogger().Debugf("Serving messages for client %s for pool %s", host, s.GetName())
+	s.opts.Logger.Debugf("Serving messages for client %s for pool %s", host, s.GetName())
 
 	s.incomerPool.RLock()
 	c := s.GetSpeakerByRemoteHost(host)
 	s.incomerPool.RUnlock()
 	if c != nil {
-		logging.GetLogger().Errorf("host_id(%s) conflict, same host_id used by %s", host, r.RemoteAddr)
+		s.opts.Logger.Errorf("host_id '%s' (%s) conflicts, same host_id used by %+v", host, r.RemoteAddr, c)
 		w.Header().Set("Connection", "close")
 		w.WriteHeader(http.StatusConflict)
 		return
@@ -94,31 +96,25 @@ func (s *Server) serveMessages(w http.ResponseWriter, r *auth.AuthenticatedReque
 
 	conn, err := websocket.Upgrade(w, &r.Request, header, 1024, 1024)
 	if err != nil {
-		logging.GetLogger().Errorf("Unable to upgrade the websocket connection for %s: %s", r.RemoteAddr, err)
+		s.opts.Logger.Errorf("Unable to upgrade the websocket connection for %s: %s", r.RemoteAddr, err)
 		w.Header().Set("Connection", "close")
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
 	// call the incomerHandler that will create the Speaker
-	c, err = s.incomerHandler(conn, r)
+	_, err = s.incomerHandler(conn, r, func(c *wsIncomingClient) (Speaker, error) { return c, nil })
 	if err != nil {
-		logging.GetLogger().Warningf("Unable to accept incomer from %s: %s", r.RemoteAddr, err)
+		s.opts.Logger.Warningf("Unable to accept incomer from %s: %s", r.RemoteAddr, err)
 		w.Header().Set("Connection", "close")
 		w.WriteHeader(http.StatusBadRequest)
 		w.Write([]byte(err.Error()))
 		return
 	}
-
-	// add the new Speaker to the server pool
-	s.AddClient(c)
-
-	// notify the pool listeners that the speaker is connected
-	s.OnConnected(c)
 }
 
-func (s *Server) newIncomingClient(conn *websocket.Conn, r *auth.AuthenticatedRequest) (*wsIncomingClient, error) {
-	logging.GetLogger().Infof("New WebSocket Connection from %s : URI path %s", conn.RemoteAddr().String(), r.URL.Path)
+func (s *Server) newIncomingClient(conn *websocket.Conn, r *auth.AuthenticatedRequest, promoter clientPromoter) (*wsIncomingClient, error) {
+	s.opts.Logger.Infof("New WebSocket Connection from %s : URI path %s", conn.RemoteAddr().String(), r.URL.Path)
 
 	clientType := common.ServiceType(getRequestParameter(&r.Request, "X-Client-Type"))
 	if clientType == "" {
@@ -133,7 +129,13 @@ func (s *Server) newIncomingClient(conn *websocket.Conn, r *auth.AuthenticatedRe
 	svc, _ := common.ServiceAddressFromString(conn.RemoteAddr().String())
 	url, _ := url.Parse(fmt.Sprintf("http://%s:%d%s", svc.Addr, svc.Port, r.URL.Path+"?"+r.URL.RawQuery))
 
-	wsconn := newConn(s.server.Host, clientType, clientProtocol, url, r.Header, s.opts.QueueSize, s.opts.WriteCompression)
+	opts := ClientOpts{
+		QueueSize:        s.opts.QueueSize,
+		WriteCompression: s.opts.WriteCompression,
+		Logger:           s.opts.Logger,
+	}
+
+	wsconn := newConn(s.server.Host, clientType, clientProtocol, url, r.Header, opts)
 	wsconn.conn = conn
 	wsconn.RemoteHost = getRequestParameter(&r.Request, "X-Host-ID")
 
@@ -155,7 +157,18 @@ func (s *Server) newIncomingClient(conn *websocket.Conn, r *auth.AuthenticatedRe
 	}
 	wsconn.wsSpeaker = c
 
-	atomic.StoreInt32((*int32)(c.State), common.RunningState)
+	pc, err := promoter(c)
+	if err != nil {
+		return nil, err
+	}
+
+	c.State.Store(common.RunningState)
+
+	// add the new Speaker to the server pool
+	s.AddClient(pc)
+
+	// notify the pool listeners that the speaker is connected
+	s.OnConnected(pc)
 
 	// send a first ping to help firefox and some other client which wait for a
 	// first ping before doing something
@@ -170,14 +183,22 @@ func (s *Server) newIncomingClient(conn *websocket.Conn, r *auth.AuthenticatedRe
 
 // NewServer returns a new Server. The given auth backend will validate the credentials
 func NewServer(server *shttp.Server, endpoint string, authBackend shttp.AuthenticationBackend, opts ServerOpts) *Server {
+	if opts.Logger == nil {
+		opts.Logger = logging.GetLogger()
+	}
+
+	poolOpts := PoolOpts{
+		Logger: opts.Logger,
+	}
+
 	s := &Server{
-		incomerPool: newIncomerPool(endpoint), // server inherits from a Speaker pool
+		incomerPool: newIncomerPool(endpoint, poolOpts), // server inherits from a Speaker pool
 		server:      server,
 		opts:        opts,
 	}
 
-	s.incomerHandler = func(conn *websocket.Conn, r *auth.AuthenticatedRequest) (Speaker, error) {
-		return s.newIncomingClient(conn, r)
+	s.incomerHandler = func(conn *websocket.Conn, r *auth.AuthenticatedRequest, promoter clientPromoter) (Speaker, error) {
+		return s.newIncomingClient(conn, r, promoter)
 	}
 
 	server.HandleFunc(endpoint, s.serveMessages, authBackend)

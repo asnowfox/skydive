@@ -43,9 +43,6 @@ var Injector = {
           self.$error({message: 'Packet injector delete error: ' + e.responseText});
           return e;
         })
-        .finally(function() {
-          app.$emit("refresh-injector-list");
-        });
     },
 
     highlightNode: function(uuid, query) {
@@ -102,7 +99,6 @@ Vue.component('injection-list', {
   data: function() {
     return {
       injectors: {},
-      intervalID: "",
     };
   },
 
@@ -113,20 +109,17 @@ Vue.component('injection-list', {
   },
 
   created: function() {
-    var self = this;
-    this.intervalID = setInterval(this.getInjectorList.bind(this), 30000);
-    this.getInjectorList();
-    app.$on("refresh-injector-list", function() {
-      self.getInjectorList();
-    });
+    websocket.addMsgHandler('OnDemandPacketInjectionNotification', this.onMsg.bind(this));
+    websocket.addConnectHandler(this.init.bind(this));
   },
 
-  destroyed: function() {
-    clearInterval(this.intervalID);
+  beforeDestroy: function() {
+    websocket.delConnectHandler(this.init.bind(this));
   },
 
   methods: {
-    getInjectorList: function() {
+
+    init: function() {
       var self = this;
       this.injectAPI.list()
         .then(function(data) {
@@ -137,6 +130,28 @@ Vue.component('injection-list', {
           return e;
         });
     },
+
+    onMsg: function(msg) {
+      var self = this;
+      switch(msg.Type) {
+        case "Deleted":
+          Vue.delete(this.injectors, msg.Obj.UUID);
+          break;
+        case "Added":
+          Vue.set(this.injectors, msg.Obj.UUID, msg.Obj);
+          break;
+        case "NodeUpdated":
+          this.injectAPI.get(msg.Obj.UUID)
+            .then(function(data) {
+              Vue.set(self.injectors, data.UUID, data);
+            })
+            .catch(function (e) {
+              self.$error({message: 'Injection get error: ' + e.responseText});
+              return e;
+            });
+      }
+    }
+
   },
 
 });

@@ -20,7 +20,9 @@ syntax = "proto3";
 package flow;
 
 import "github.com/gogo/protobuf/gogoproto/gogo.proto";
-import "flow/layers/generated.proto";
+import "flow/layers/dns.proto";
+import "flow/layers/dhcpv4.proto";
+import "flow/layers/vrrpv2.proto";
 
 import "filters/filters.proto";
 
@@ -96,6 +98,7 @@ message RawPacket {
   int64 Timestamp = 1;
   int64 Index = 2;
   bytes Data = 3;
+  uint32 LinkType = 4 [(gogoproto.casttype) = "github.com/google/gopacket/layers.LinkType"];
 }
 
 message IPMetric {
@@ -127,6 +130,10 @@ message TCPMetric {
   int64 BABytes = 20;
   int64 BASawStart = 21;
   int64 BASawEnd = 22;
+}
+
+message Message {
+  repeated Flow Flows = 1;
 }
 
 message Flow {
@@ -184,17 +191,17 @@ message Flow {
 /* Topology info */
   string NodeTID = 33;
 
+/* Capture info */
+  string CaptureID = 34;
+
 /* raw packets, will not be exported, see Makefile */
   repeated RawPacket LastRawPackets = 36;
+
 /* number of raw packet captured */
   int64 RawPacketsCaptured = 37;
 
 /* describes the way the flow was ended (e.g. by RST, FIN) */
   FlowFinishType FinishType = 60;
-}
-
-message FlowArray {
-  repeated Flow Flows = 1;
 }
 
 message FlowSet {

@@ -23,9 +23,9 @@ import (
 	"github.com/skydive-project/skydive/common"
 	"github.com/skydive-project/skydive/graffiti/graph"
 	"github.com/skydive-project/skydive/graffiti/graph/traversal"
+	"github.com/skydive-project/skydive/graffiti/validator"
 	gws "github.com/skydive-project/skydive/graffiti/websocket"
 	"github.com/skydive-project/skydive/logging"
-	"github.com/skydive-project/skydive/topology"
 	ws "github.com/skydive-project/skydive/websocket"
 )
 
@@ -39,20 +39,20 @@ const (
 	DeleteOnDisconnect PersistencePolicy = "DeleteOnDisconnect"
 )
 
-// TopologyPublisherEndpoint serves the graph for external publishers, for instance
+// PublisherEndpoint serves the graph for external publishers, for instance
 // an external program that interacts with the Skydive graph.
-type TopologyPublisherEndpoint struct {
+type PublisherEndpoint struct {
 	common.RWMutex
 	ws.DefaultSpeakerEventHandler
-	pool            ws.StructSpeakerPool
-	Graph           *graph.Graph
-	schemaValidator *topology.SchemaValidator
-	gremlinParser   *traversal.GremlinTraversalParser
-	cached          *graph.CachedBackend
+	pool          ws.StructSpeakerPool
+	Graph         *graph.Graph
+	validator     validator.Validator
+	gremlinParser *traversal.GremlinTraversalParser
+	cached        *graph.CachedBackend
 }
 
 // OnDisconnected called when a publisher got disconnected.
-func (t *TopologyPublisherEndpoint) OnDisconnected(c ws.Speaker) {
+func (t *PublisherEndpoint) OnDisconnected(c ws.Speaker) {
 	policy := PersistencePolicy(c.GetHeaders().Get("X-Persistence-Policy"))
 	if policy == Persistent {
 		return
@@ -68,7 +68,7 @@ func (t *TopologyPublisherEndpoint) OnDisconnected(c ws.Speaker) {
 }
 
 // OnStructMessage is triggered by message coming from a publisher.
-func (t *TopologyPublisherEndpoint) OnStructMessage(c ws.Speaker, msg *ws.StructMessage) {
+func (t *PublisherEndpoint) OnStructMessage(c ws.Speaker, msg *ws.StructMessage) {
 	msgType, obj, err := gws.UnmarshalMessage(msg)
 	if err != nil {
 		logging.GetLogger().Errorf("Graph: Unable to parse the event %v: %s", msg, err)
@@ -77,18 +77,20 @@ func (t *TopologyPublisherEndpoint) OnStructMessage(c ws.Speaker, msg *ws.Struct
 
 	origin := clientOrigin(c)
 
-	switch msgType {
-	case gws.NodeAddedMsgType, gws.NodeUpdatedMsgType, gws.NodeDeletedMsgType:
-		obj.(*graph.Node).Origin = origin
-		err = t.schemaValidator.ValidateNode(obj.(*graph.Node))
-	case gws.EdgeAddedMsgType, gws.EdgeUpdatedMsgType, gws.EdgeDeletedMsgType:
-		obj.(*graph.Edge).Origin = origin
-		err = t.schemaValidator.ValidateEdge(obj.(*graph.Edge))
-	}
+	if t.validator != nil {
+		switch msgType {
+		case gws.NodeAddedMsgType, gws.NodeUpdatedMsgType, gws.NodeDeletedMsgType:
+			obj.(*graph.Node).Origin = origin
+			err = t.validator.ValidateNode(obj.(*graph.Node))
+		case gws.EdgeAddedMsgType, gws.EdgeUpdatedMsgType, gws.EdgeDeletedMsgType:
+			obj.(*graph.Edge).Origin = origin
+			err = t.validator.ValidateEdge(obj.(*graph.Edge))
+		}
 
-	if err != nil {
-		logging.GetLogger().Error(err)
-		return
+		if err != nil {
+			logging.GetLogger().Error(err)
+			return
+		}
 	}
 
 	t.Graph.Lock()
@@ -138,19 +140,14 @@ func (t *TopologyPublisherEndpoint) OnStructMessage(c ws.Speaker, msg *ws.Struct
 	}
 }
 
-// NewTopologyPublisherEndpoint returns a new server for external publishers.
-func NewTopologyPublisherEndpoint(pool ws.StructSpeakerPool, cached *graph.CachedBackend, g *graph.Graph) (*TopologyPublisherEndpoint, error) {
-	schemaValidator, err := topology.NewSchemaValidator()
-	if err != nil {
-		return nil, err
-	}
-
-	t := &TopologyPublisherEndpoint{
-		Graph:           g,
-		pool:            pool,
-		schemaValidator: schemaValidator,
-		gremlinParser:   traversal.NewGremlinTraversalParser(),
-		cached:          cached,
+// NewPublisherEndpoint returns a new server for external publishers.
+func NewPublisherEndpoint(pool ws.StructSpeakerPool, cached *graph.CachedBackend, g *graph.Graph, validator validator.Validator) (*PublisherEndpoint, error) {
+	t := &PublisherEndpoint{
+		Graph:         g,
+		pool:          pool,
+		validator:     validator,
+		gremlinParser: traversal.NewGremlinTraversalParser(),
+		cached:        cached,
 	}
 
 	pool.AddEventHandler(t)

@@ -32,16 +32,18 @@ type ProbeCapability int
 
 const (
 	// BPFCapability the probe is able to handle bpf filters
-	BPFCapability ProbeCapability = 1
+	BPFCapability ProbeCapability = 1 << 0
 	// RawPacketsCapability the probe can capture raw packets
-	RawPacketsCapability = 2
+	RawPacketsCapability = 1 << 1
 	// ExtraTCPMetricCapability the probe can report TCP metrics
-	ExtraTCPMetricCapability = 4
+	ExtraTCPMetricCapability = 1 << 2
+	// MultipleOnSameNodeCapability is defined on probes that support multiple captures of the same type on one node
+	MultipleOnSameNodeCapability = 1 << 3
 )
 
 var (
 	// ProbeTypes returns a list of all the capture probes
-	ProbeTypes = []string{"ovssflow", "pcapsocket", "ovsmirror", "dpdk", "afpacket", "pcap", "ebpf", "sflow"}
+	ProbeTypes = []string{"ovssflow", "pcapsocket", "ovsmirror", "dpdk", "afpacket", "pcap", "ebpf", "sflow", "ovsnetflow"}
 
 	// CaptureTypes contains all registered capture type and associated probes
 	CaptureTypes = map[string]CaptureType{}
@@ -51,7 +53,7 @@ var (
 )
 
 func initCaptureTypes() {
-	CaptureTypes["ovsbridge"] = CaptureType{Allowed: []string{"ovssflow", "pcapsocket"}, Default: "ovssflow"}
+	CaptureTypes["ovsbridge"] = CaptureType{Allowed: []string{"ovssflow", "pcapsocket", "ovsnetflow"}, Default: "ovssflow"}
 	CaptureTypes["ovsport"] = CaptureType{Allowed: []string{"ovsmirror"}, Default: "ovsmirror"}
 	CaptureTypes["dpdkport"] = CaptureType{Allowed: []string{"dpdk"}, Default: "dpdk"}
 
@@ -75,14 +77,15 @@ func IsCaptureAllowed(nodeType string) bool {
 }
 
 func initProbeCapabilities() {
-	ProbeCapabilities["afpacket"] = BPFCapability | RawPacketsCapability | ExtraTCPMetricCapability
-	ProbeCapabilities["pcap"] = BPFCapability | RawPacketsCapability | ExtraTCPMetricCapability
+	ProbeCapabilities["afpacket"] = BPFCapability | RawPacketsCapability | ExtraTCPMetricCapability | MultipleOnSameNodeCapability
+	ProbeCapabilities["pcap"] = BPFCapability | RawPacketsCapability | ExtraTCPMetricCapability | MultipleOnSameNodeCapability
 	ProbeCapabilities["pcapsocket"] = BPFCapability | RawPacketsCapability | ExtraTCPMetricCapability
 	ProbeCapabilities["sflow"] = BPFCapability | RawPacketsCapability | ExtraTCPMetricCapability
 	ProbeCapabilities["ovssflow"] = BPFCapability | RawPacketsCapability | ExtraTCPMetricCapability
-	ProbeCapabilities["afpacket"] = BPFCapability | RawPacketsCapability | ExtraTCPMetricCapability
 	ProbeCapabilities["dpdk"] = BPFCapability | RawPacketsCapability | ExtraTCPMetricCapability
 	ProbeCapabilities["ovsmirror"] = BPFCapability | RawPacketsCapability | ExtraTCPMetricCapability
+	ProbeCapabilities["ebpf"] = ExtraTCPMetricCapability
+	ProbeCapabilities["ovsnetflow"] = BPFCapability | RawPacketsCapability | ExtraTCPMetricCapability
 }
 
 // CheckProbeCapabilities checks that a probe supports given capabilities

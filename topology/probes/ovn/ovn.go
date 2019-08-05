@@ -1,3 +1,5 @@
+//go:generate go run ../../../scripts/gendecoder.go -package github.com/skydive-project/skydive/topology/probes/ovn
+
 /*
  * Copyright (C) 2019 Red Hat, Inc.
  *
@@ -18,10 +20,14 @@
 package ovn
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 
 	"github.com/skydive-project/skydive/common"
+	"github.com/skydive-project/skydive/probe"
+	"github.com/skydive-project/skydive/topology/probes"
 
 	goovn "github.com/ebay/go-ovn"
 	"github.com/skydive-project/skydive/graffiti/graph"
@@ -35,15 +41,13 @@ type ovnEvent func()
 type Probe struct {
 	graph.ListenerHandler
 	graph       *graph.Graph
-	wg          sync.WaitGroup
-	socketfile  string
-	protocol    string
-	server      string
-	port        int
-	ovndbapi    goovn.OVNDBApi
+	address     string
+	ovndbapi    goovn.Client
 	switchPorts map[string]*goovn.LogicalSwitch
 	eventChan   chan ovnEvent
+	bundle      *probe.Bundle
 	aclIndexer  *graph.Indexer
+	ifaces      *graph.MetadataIndexer
 	lsIndexer   *graph.Indexer
 	lspIndexer  *graph.Indexer
 	lrIndexer   *graph.Indexer
@@ -53,6 +57,60 @@ type Probe struct {
 	rpLinker    *graph.ResourceLinker
 	aclLinker   *graph.ResourceLinker
 	ifaceLinker *graph.MetadataIndexerLinker
+}
+
+// Metadata describes the information of an OVN object
+// easyjson:json
+// gendecoder
+type Metadata struct {
+	LSPMetadata `json:",omitempty"`
+	LRPMetadata `json:",omitempty"`
+	ACLMetadata `json:",omitempty"`
+
+	ExtID   graph.Metadata `json:",omitempty" field:"Metadata"`
+	Options graph.Metadata `json:",omitempty" field:"Metadata"`
+}
+
+// LSPMetadata describes the information of an OVN logical router
+// easyjson:json
+// gendecoder
+type LSPMetadata struct {
+	Addresses     []string `json:",omitempty"`
+	PortSecurity  []string `json:",omitempty"`
+	DHCPv4Options string   `json:",omitempty"`
+	DHCPv6Options string   `json:",omitempty"`
+	Type          string   `json:",omitempty"`
+}
+
+// LRPMetadata describes the information of an OVN logical router port
+// easyjson:json
+// gendecoder
+type LRPMetadata struct {
+	GatewayChassis []string       `json:",omitempty"`
+	IPv6RAConfigs  graph.Metadata `json:",omitempty" field:"Metadata"`
+	Networks       []string       `json:",omitempty"`
+	Peer           string         `json:",omitempty"`
+}
+
+// ACLMetadata describes the information of an OVN ACL
+// easyjson:json
+// gendecoder
+type ACLMetadata struct {
+	Action    string `json:",omitempty"`
+	Direction string `json:",omitempty"`
+	Log       bool   `json:",omitempty"`
+	Match     string `json:",omitempty"`
+	Priority  int64  `json:",omitempty"`
+}
+
+// MetadataDecoder implements a json message raw decoder
+func MetadataDecoder(raw json.RawMessage) (common.Getter, error) {
+	var m Metadata
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil, fmt.Errorf("unable to unmarshal OVN metadata %s: %s", string(raw), err)
+	}
+
+	return &m, nil
 }
 
 func uuidHasher(n *graph.Node) map[string]interface{} {
@@ -66,11 +124,11 @@ type switchPortLinker struct {
 	probe *Probe
 }
 
-// GetABLinks returns all the links from a specifed logical switch to its logical ports
+// GetABLinks returns all the links from a specified logical switch to its logical ports
 func (l *switchPortLinker) GetABLinks(lsNode *graph.Node) (edges []*graph.Edge) {
 	probe := l.probe
 	name, _ := lsNode.GetFieldString("Name")
-	ports, _ := l.probe.ovndbapi.GetLogicalSwitchPortsBySwitch(name)
+	ports, _ := l.probe.ovndbapi.LSPList(name)
 	for _, lp := range ports {
 		if lpNode, _ := probe.lspIndexer.GetNode(lp.UUID); lpNode != nil {
 			link, err := topology.NewLink(probe.graph, lsNode, lpNode, topology.OwnershipLink, nil)
@@ -88,9 +146,9 @@ func (l *switchPortLinker) GetABLinks(lsNode *graph.Node) (edges []*graph.Edge) 
 func (l *switchPortLinker) GetBALinks(lpNode *graph.Node) (edges []*graph.Edge) {
 	probe := l.probe
 	uuid, _ := lpNode.GetFieldString("UUID")
-	switches, _ := l.probe.ovndbapi.GetLogicalSwitches()
+	switches, _ := l.probe.ovndbapi.LSList()
 	for _, ls := range switches {
-		ports, _ := l.probe.ovndbapi.GetLogicalSwitchPortsBySwitch(ls.Name)
+		ports, _ := l.probe.ovndbapi.LSPList(ls.Name)
 		for _, lp := range ports {
 			if lp.UUID == uuid {
 				if lsNode, _ := probe.lsIndexer.GetNode(ls.UUID); lsNode != nil {
@@ -111,11 +169,11 @@ type routerPortLinker struct {
 	probe *Probe
 }
 
-// GetABLinks returns all the links from a specifed logical router to its logical ports
+// GetABLinks returns all the links from a specified logical router to its logical ports
 func (l *routerPortLinker) GetABLinks(lrNode *graph.Node) (edges []*graph.Edge) {
 	probe := l.probe
 	name, _ := lrNode.GetFieldString("Name")
-	ports, _ := l.probe.ovndbapi.GetLogicalRouterPortsByRouter(name)
+	ports, _ := l.probe.ovndbapi.LRPList(name)
 	for _, lp := range ports {
 		if lrpNode, _ := probe.lrpIndexer.GetNode(lp.UUID); lrpNode != nil {
 			link, err := topology.NewLink(probe.graph, lrNode, lrpNode, topology.OwnershipLink, nil)
@@ -133,9 +191,9 @@ func (l *routerPortLinker) GetABLinks(lrNode *graph.Node) (edges []*graph.Edge) 
 func (l *routerPortLinker) GetBALinks(lrpNode *graph.Node) (edges []*graph.Edge) {
 	probe := l.probe
 	uuid, _ := lrpNode.GetFieldString("UUID")
-	routers, _ := l.probe.ovndbapi.GetLogicalRouters()
+	routers, _ := l.probe.ovndbapi.LRList()
 	for _, lr := range routers {
-		ports, _ := l.probe.ovndbapi.GetLogicalRouterPortsByRouter(lr.Name)
+		ports, _ := l.probe.ovndbapi.LRPList(lr.Name)
 		for _, lp := range ports {
 			if lp.UUID == uuid {
 				if lrNode, _ := probe.lrIndexer.GetNode(lr.UUID); lrNode != nil {
@@ -159,7 +217,7 @@ type aclLinker struct {
 // GetABLinks returns all the links from a specified port group to its ACLs
 func (l *aclLinker) GetABLinks(lsNode *graph.Node) (edges []*graph.Edge) {
 	name, _ := lsNode.GetFieldString("Name")
-	acls, _ := l.probe.ovndbapi.GetACLsBySwitch(name)
+	acls, _ := l.probe.ovndbapi.ACLList(name)
 	for _, acl := range acls {
 		if aclNode, _ := l.probe.aclIndexer.GetNode(acl.UUID); aclNode != nil {
 			if link, _ := topology.NewLink(l.probe.graph, lsNode, aclNode, topology.OwnershipLink, nil); link != nil {
@@ -173,9 +231,9 @@ func (l *aclLinker) GetABLinks(lsNode *graph.Node) (edges []*graph.Edge) {
 // GetBALinks returns all the links from a port group to the specified ACL
 func (l *aclLinker) GetBALinks(aclNode *graph.Node) (edges []*graph.Edge) {
 	uuid, _ := aclNode.GetFieldString("Name")
-	switches, _ := l.probe.ovndbapi.GetLogicalSwitches()
+	switches, _ := l.probe.ovndbapi.LSList()
 	for _, ls := range switches {
-		acls, _ := l.probe.ovndbapi.GetACLsBySwitch(ls.Name)
+		acls, _ := l.probe.ovndbapi.ACLList(ls.Name)
 		for _, acl := range acls {
 			if acl.UUID == uuid {
 				if lsNode, _ := l.probe.lsIndexer.GetNode(ls.UUID); lsNode != nil {
@@ -228,29 +286,27 @@ func (p *Probe) unregisterNode(indexer *graph.Indexer, uuid string) {
 }
 
 func (p *Probe) logicalSwitchMetadata(ls *goovn.LogicalSwitch) graph.Metadata {
-	m := graph.Metadata{
+	return graph.Metadata{
 		"Type":    "logical_switch",
 		"Name":    ls.Name,
 		"Manager": "ovn",
 		"UUID":    ls.UUID,
+		"OVN": &Metadata{
+			ExtID: common.NormalizeValue(ls.ExternalID).(map[string]interface{}),
+		},
 	}
-	if len(ls.ExternalID) > 0 {
-		m["ExtID"] = common.NormalizeValue(ls.ExternalID)
-	}
-	return m
 }
 
-func (p *Probe) logicalRouterMetadata(ls *goovn.LogicalRouter) graph.Metadata {
-	m := graph.Metadata{
+func (p *Probe) logicalRouterMetadata(lr *goovn.LogicalRouter) graph.Metadata {
+	return graph.Metadata{
 		"Type":    "logical_router",
-		"Name":    ls.Name,
+		"Name":    lr.Name,
 		"Manager": "ovn",
-		"UUID":    ls.UUID,
+		"UUID":    lr.UUID,
+		"OVN": &Metadata{
+			ExtID: common.NormalizeValue(lr.ExternalID).(map[string]interface{}),
+		},
 	}
-	if len(ls.ExternalID) > 0 {
-		m["ExtID"] = common.NormalizeValue(ls.ExternalID)
-	}
-	return m
 }
 
 // OnLogicalSwitchCreate is called when a logical switch is created
@@ -264,68 +320,45 @@ func (p *Probe) OnLogicalSwitchDelete(ls *goovn.LogicalSwitch) {
 }
 
 func (p *Probe) logicalPortMetadata(lp *goovn.LogicalSwitchPort) graph.Metadata {
-	m := graph.Metadata{
+	return graph.Metadata{
 		"Type":    "logical_port",
 		"Name":    lp.Name,
 		"UUID":    lp.UUID,
 		"Manager": "ovn",
+		"OVN": &Metadata{
+			LSPMetadata: LSPMetadata{
+				Addresses:     lp.Addresses,
+				PortSecurity:  lp.PortSecurity,
+				DHCPv4Options: lp.DHCPv4Options,
+				DHCPv6Options: lp.DHCPv6Options,
+				Type:          lp.Type,
+			},
+			ExtID:   common.NormalizeValue(lp.ExternalID).(map[string]interface{}),
+			Options: common.NormalizeValue(lp.Options).(map[string]interface{}),
+		},
 	}
-
-	if len(lp.Addresses) > 0 {
-		m["Addresses"] = lp.Addresses
-	}
-	if len(lp.PortSecurity) > 0 {
-		m["PortSecurity"] = lp.PortSecurity
-	}
-	if len(lp.DHCPv4Options) > 0 {
-		m["DHCPv4Options"] = lp.DHCPv4Options
-	}
-	if len(lp.DHCPv6Options) > 0 {
-		m["DHCPv6Options"] = lp.DHCPv6Options
-	}
-	if len(lp.ExternalID) > 0 {
-		m["ExtID"] = common.NormalizeValue(lp.ExternalID)
-	}
-	if len(lp.Options) > 0 {
-		m["Options"] = common.NormalizeValue(lp.Options)
-	}
-	if lp.Type != "" {
-		m["PortType"] = lp.Type
-	}
-
-	return m
 }
 
 func (p *Probe) logicalRouterPortMetadata(lp *goovn.LogicalRouterPort) graph.Metadata {
-	m := graph.Metadata{
+	return graph.Metadata{
 		"Type":    "logical_port",
 		"Name":    lp.Name,
 		"UUID":    lp.UUID,
 		"Manager": "ovn",
 		"Enabled": lp.Enabled,
 		"MAC":     lp.MAC,
+		"OVN": &Metadata{
+			LRPMetadata: LRPMetadata{
+				GatewayChassis: lp.GatewayChassis,
+				IPv6RAConfigs:  common.NormalizeValue(lp.IPv6RAConfigs).(map[string]interface{}),
+				Networks:       lp.Networks,
+				Peer:           lp.Peer,
+			},
+			ExtID:   common.NormalizeValue(lp.ExternalID).(map[string]interface{}),
+			Options: common.NormalizeValue(lp.Options).(map[string]interface{}),
+		},
 	}
 
-	if len(lp.ExternalID) > 0 {
-		m["ExternalID"] = common.NormalizeValue(lp.ExternalID)
-	}
-	if len(lp.GatewayChassis) > 0 {
-		m["GatewayChassis"] = lp.GatewayChassis
-	}
-	if len(lp.IPv6RAConfigs) > 0 {
-		m["IPv6RAConfigs"] = common.NormalizeValue(lp.IPv6RAConfigs)
-	}
-	if len(lp.Networks) > 0 {
-		m["Networks"] = lp.Networks
-	}
-	if len(lp.Options) > 0 {
-		m["Options"] = common.NormalizeValue(lp.Options)
-	}
-	if lp.Peer != "" {
-		m["Peer"] = lp.Peer
-	}
-
-	return m
 }
 
 // OnLogicalPortCreate is called when a logical port is created on a switch
@@ -374,6 +407,14 @@ func (p *Probe) OnLogicalRouterPortDelete(lp *goovn.LogicalRouterPort) {
 	p.eventChan <- func() { p.unregisterNode(p.lrpIndexer, lp.UUID) }
 }
 
+// OnLogicalRouterStaticRouteCreate is called when a static route is added to a router
+func (p *Probe) OnLogicalRouterStaticRouteCreate(lp *goovn.LogicalRouterStaticRoute) {
+}
+
+// OnLogicalRouterStaticRouteDelete is called when a static route is removed from a router
+func (p *Probe) OnLogicalRouterStaticRouteDelete(lp *goovn.LogicalRouterStaticRoute) {
+}
+
 // OnQoSCreate is called when QoS is created
 func (p *Probe) OnQoSCreate(*goovn.QoS) {
 }
@@ -384,15 +425,19 @@ func (p *Probe) OnQoSDelete(*goovn.QoS) {
 
 func (p *Probe) aclMetadata(acl *goovn.ACL) graph.Metadata {
 	return graph.Metadata{
-		"Type":       "acl",
-		"Name":       acl.UUID,
-		"Manager":    "ovn",
-		"Action":     acl.Action,
-		"Direction":  acl.Direction,
-		"ExternalID": common.NormalizeValue(acl.ExternalID),
-		"Log":        acl.Log,
-		"Match":      acl.Match,
-		"Priority":   acl.Priority,
+		"Type":    "acl",
+		"Name":    acl.UUID,
+		"Manager": "ovn",
+		"OVN": Metadata{
+			ACLMetadata: ACLMetadata{
+				Action:    acl.Action,
+				Direction: acl.Direction,
+				Log:       acl.Log,
+				Match:     acl.Match,
+				Priority:  int64(acl.Priority),
+			},
+			ExtID: common.NormalizeValue(acl.ExternalID).(map[string]interface{}),
+		},
 	}
 }
 
@@ -411,109 +456,90 @@ func (p *Probe) OnError(err error) {
 	logging.GetLogger().Error(err)
 }
 
-// Start the probe
-func (p *Probe) Start() {
-	p.lsIndexer.Start()
-	p.lspIndexer.Start()
-	p.lrIndexer.Start()
-	p.lrpIndexer.Start()
-	p.aclIndexer.Start()
-	p.spLinker.Start()
-	p.rpLinker.Start()
-	p.aclLinker.Start()
-	p.srLinker.Start()
-	p.ifaceLinker.Start()
+// OnDisconnected is called when the connection to OVSDB is lost
+func (p *Probe) OnDisconnected() {
+	logging.GetLogger().Warning("disconnected from the OVSDB API")
+	close(p.eventChan)
+}
 
+// Do implements the probe main loop
+func (p *Probe) Do(ctx context.Context, wg *sync.WaitGroup) error {
 	var err error
 	logging.GetLogger().Debugf("Trying to get an OVN DB api")
-	p.ovndbapi, err = goovn.GetInstance(p.socketfile, p.protocol, p.server, p.port, p)
+	cfg := &goovn.Config{
+		Addr:         p.address,
+		SignalCB:     p,
+		DisconnectCB: p.OnDisconnected,
+	}
+	p.ovndbapi, err = goovn.NewClient(cfg)
 	if err != nil {
-		logging.GetLogger().Error(err)
-		return
+		return err
 	}
 	logging.GetLogger().Debugf("Successfully got an OVN DB api")
 
+	p.graph.RLock()
+	p.ifaces.Sync()
+	p.graph.RUnlock()
+
+	p.bundle.Start()
+
 	// Initial synchronization
-	switches, _ := p.ovndbapi.GetLogicalSwitches()
+	switches, _ := p.ovndbapi.LSList()
 	for _, ls := range switches {
 		p.OnLogicalSwitchCreate(ls)
 
-		ports, _ := p.ovndbapi.GetLogicalSwitchPortsBySwitch(ls.Name)
+		ports, _ := p.ovndbapi.LSPList(ls.Name)
 		for _, lp := range ports {
 			p.OnLogicalPortCreate(lp)
 		}
 
-		acls, _ := p.ovndbapi.GetACLsBySwitch(ls.Name)
+		acls, _ := p.ovndbapi.ACLList(ls.Name)
 		for _, acl := range acls {
 			p.OnACLCreate(acl)
 		}
 	}
 
-	routers, _ := p.ovndbapi.GetLogicalRouters()
+	routers, _ := p.ovndbapi.LRList()
+
 	for _, lr := range routers {
 		p.OnLogicalRouterCreate(lr)
 
-		ports, _ := p.ovndbapi.GetLogicalRouterPortsByRouter(lr.Name)
+		ports, _ := p.ovndbapi.LRPList(lr.Name)
 		for _, lp := range ports {
 			p.OnLogicalRouterPortCreate(lp)
 		}
 	}
 
-	p.wg.Add(1)
+	wg.Add(1)
 
 	go func() {
-		defer p.wg.Done()
+		defer func() {
+			wg.Done()
+			p.bundle.Stop()
+		}()
 
-		for eventCallback := range p.eventChan {
-			eventCallback()
+		for {
+			select {
+			case eventCallback, ok := <-p.eventChan:
+				if !ok {
+					return
+				}
+				eventCallback()
+			case <-ctx.Done():
+				p.ovndbapi.Close()
+				return
+			}
 		}
 	}()
-}
 
-// Stop the probe
-func (p *Probe) Stop() {
-	close(p.eventChan)
-	p.wg.Wait()
-	p.lsIndexer.Stop()
-	p.lspIndexer.Stop()
-	p.lrIndexer.Stop()
-	p.lrpIndexer.Stop()
-	p.aclIndexer.Stop()
-	p.spLinker.Stop()
-	p.aclLinker.Stop()
-	p.rpLinker.Stop()
-	p.ifaceLinker.Stop()
+	return nil
 }
 
 // NewProbe creates a new graph OVS database probe
-func NewProbe(g *graph.Graph, address string) (*Probe, error) {
-	port, socketfile, server := 0, "", ""
-
-	protocol, target, err := common.ParseAddr(address)
-	if err != nil {
-		return nil, err
-	}
-
-	switch protocol {
-	case "unix":
-		protocol, socketfile = goovn.UNIX, target
-	case "tcp":
-
-		sa, err := common.ServiceAddressFromString(target)
-		if err != nil {
-			return nil, err
-		}
-		protocol, server, port = goovn.TCP, sa.Addr, sa.Port
-	default:
-		return nil, fmt.Errorf("unsupported protocol %s", protocol)
-	}
-
-	probe := &Probe{
+func NewProbe(g *graph.Graph, address string) (probe.Handler, error) {
+	p := &Probe{
 		graph:      g,
-		protocol:   protocol,
-		socketfile: socketfile,
-		server:     server,
-		port:       port,
+		address:    address,
 		eventChan:  make(chan ovnEvent, 50),
 		aclIndexer: graph.NewIndexer(g, nil, uuidHasher, false),
 		lsIndexer:  graph.NewIndexer(g, nil, uuidHasher, false),
@@ -522,51 +548,66 @@ func NewProbe(g *graph.Graph, address string) (*Probe, error) {
 		lrpIndexer: graph.NewIndexer(g, nil, uuidHasher, false),
 	}
 
+	p.bundle = &probe.Bundle{
+		Handlers: map[string]probe.Handler{
+			"aclIndexer": p.aclIndexer,
+			"lsIndexer":  p.lsIndexer,
+			"lspIndexer": p.lspIndexer,
+			"lrIndexer":  p.lrIndexer,
+			"lrpIndexer": p.lrpIndexer,
+		},
+	}
+
 	// Link logical switches to their ports
-	probe.spLinker = graph.NewResourceLinker(g,
-		[]graph.ListenerHandler{probe.lsIndexer},
-		[]graph.ListenerHandler{probe.lspIndexer},
-		&switchPortLinker{probe: probe}, nil)
+	p.spLinker = graph.NewResourceLinker(g,
+		[]graph.ListenerHandler{p.lsIndexer},
+		[]graph.ListenerHandler{p.lspIndexer},
+		&switchPortLinker{probe: p}, nil)
+	p.bundle.AddHandler("spLinker", p.spLinker)
 
 	// Link logical routers to their ports
-	probe.rpLinker = graph.NewResourceLinker(g,
-		[]graph.ListenerHandler{probe.lrIndexer},
-		[]graph.ListenerHandler{probe.lrpIndexer},
-		&routerPortLinker{probe: probe}, nil)
+	p.rpLinker = graph.NewResourceLinker(g,
+		[]graph.ListenerHandler{p.lrIndexer},
+		[]graph.ListenerHandler{p.lrpIndexer},
+		&routerPortLinker{probe: p}, nil)
+	p.bundle.AddHandler("rpLinker", p.rpLinker)
 
 	// Link ports switches to their ACLs
-	probe.aclLinker = graph.NewResourceLinker(g,
-		[]graph.ListenerHandler{probe.lspIndexer},
-		[]graph.ListenerHandler{probe.aclIndexer},
-		&aclLinker{probe: probe}, nil)
+	p.aclLinker = graph.NewResourceLinker(g,
+		[]graph.ListenerHandler{p.lspIndexer},
+		[]graph.ListenerHandler{p.aclIndexer},
+		&aclLinker{probe: p}, nil)
+	p.bundle.AddHandler("aclLinker", p.aclLinker)
 
 	// We create a metadata indexer linker to link the logical switch ports that have
 	// an Options.router-port attribute to the logical router port with the specified name
-	lspIndexer := graph.NewMetadataIndexer(g, probe.lspIndexer, nil, "Options.router-port")
-	lspIndexer.Start()
+	routerPortIndexer := graph.NewMetadataIndexer(g, p.lspIndexer, nil, "OVN.Options.router-port")
+	p.bundle.AddHandler("routerPortIndexer", routerPortIndexer)
 
-	lrpIndexer := graph.NewMetadataIndexer(g, probe.lrpIndexer, graph.Metadata{"Type": "logical_port"}, "Name")
-	lrpIndexer.Start()
+	lpIndexer := graph.NewMetadataIndexer(g, p.lrpIndexer, graph.Metadata{"Type": "logical_port"}, "Name")
+	p.bundle.AddHandler("lpIndexer", lpIndexer)
 
-	probe.srLinker = graph.NewMetadataIndexerLinker(g, lspIndexer, lrpIndexer, graph.Metadata{"RelationType": "layer2"})
+	p.srLinker = graph.NewMetadataIndexerLinker(g, routerPortIndexer, lpIndexer, graph.Metadata{"RelationType": "layer2"})
+	p.bundle.AddHandler("srLinker", p.srLinker)
 
 	// We create an other metadata indexer linker to link the OVS interfaces to their logical OVN port
 	// To do so, we use the ExtID.iface-id attribute to link an interface to the logical
 	// switch port with the specified name
-	ifaceIndexer := graph.NewMetadataIndexer(g, g, nil, "ExtID.iface-id")
-	ifaceIndexer.Start()
+	p.ifaces = graph.NewMetadataIndexer(g, g, nil, "ExtID.iface-id")
+	p.bundle.AddHandler("ifaces", p.ifaces)
 
-	lspIndexer = graph.NewMetadataIndexer(g, probe.lspIndexer, graph.Metadata{"Type": "logical_port"}, "Name")
-	lspIndexer.Start()
+	lpIndexer2 := graph.NewMetadataIndexer(g, p.lspIndexer, graph.Metadata{"Type": "logical_port"}, "Name")
+	p.bundle.AddHandler("lpIndexer2", lpIndexer2)
 
-	probe.ifaceLinker = graph.NewMetadataIndexerLinker(g, ifaceIndexer, lspIndexer, graph.Metadata{"RelationType": "mapping"})
+	p.ifaceLinker = graph.NewMetadataIndexerLinker(g, p.ifaces, lpIndexer2, graph.Metadata{"RelationType": "mapping"})
+	p.bundle.AddHandler("ifaceLinker", p.ifaceLinker)
 
 	// Handle linkers errors
-	probe.aclLinker.AddEventListener(probe)
-	probe.rpLinker.AddEventListener(probe)
-	probe.spLinker.AddEventListener(probe)
-	probe.srLinker.AddEventListener(probe)
-	probe.ifaceLinker.AddEventListener(probe)
+	p.aclLinker.AddEventListener(p)
+	p.rpLinker.AddEventListener(p)
+	p.spLinker.AddEventListener(p)
+	p.srLinker.AddEventListener(p)
+	p.ifaceLinker.AddEventListener(p)
 
-	return probe, nil
+	return probes.NewProbeWrapper(p), nil
 }

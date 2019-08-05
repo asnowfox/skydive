@@ -28,8 +28,7 @@ enum {
 
 enum {
 	START_TIME_NS    = 0,
-	FIRST_LAYER,
-	PAYLOAD_LENGTH   = 24,
+	FIRST_LAYER
 };
 
 enum {
@@ -62,7 +61,7 @@ enum {
 #endif
 
 struct link_layer {
-	__u8   protocol;	// currenlty only supporting ethernet
+	__u8   protocol;	// currently only supporting ethernet
 	__u8   mac_src[ETH_ALEN];
 	__u8   mac_dst[ETH_ALEN];
 
@@ -89,7 +88,6 @@ struct icmp_layer {
 };
 
 struct transport_layer {
-	__u8   protocol;
 	__be16 port_src;
 	__be16 port_dst;
 
@@ -101,6 +99,7 @@ struct transport_layer {
 	__u64  ba_rst;
 
 	__u64  _hash;
+	__u8   protocol;
 };
 
 struct flow_metrics {
@@ -139,8 +138,6 @@ struct flow {
 
 	__u64                  start;
 	__u64                  last;
-
-	__u8                   payload[PAYLOAD_LENGTH];
 
 	__u64                  _flags;
 };
